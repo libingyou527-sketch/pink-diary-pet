@@ -1,10 +1,9 @@
-﻿/**
+/**
  * Experimental bridge between buildChatContext's token budget and the
  * structured block ledger. It never waits for the background summary: the
  * current reply gets recent history plus a block index, while the summary runs
  * asynchronously and becomes available on the next turn.
  */
-import { buildMemoryToolPrompt } from "./memory-tools.js";
 
 function normalize(messages) {
     return (Array.isArray(messages) ? messages : [])
@@ -93,7 +92,7 @@ export async function prepareStructuredContext({
     if (indexText) {
         nextSystem = nextSystem +
             "\n\n【可检索旧记忆】\n" + indexText +
-            "\n需要旧细节时，可以检索这些块；不要编造块里没有的内容。\n\n" + buildMemoryToolPrompt();
+            "\n需要旧细节时，可以检索这些块；不要编造块里没有的内容。";
     }
 
     // Cheap deterministic fallback: surface the best matching block previews

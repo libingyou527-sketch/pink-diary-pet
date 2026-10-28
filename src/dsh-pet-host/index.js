@@ -15,7 +15,7 @@ import { loadRuntimeConfig } from "./config.js";
 import { createMemoryBlockStore } from "./memory-blocks.js";
 import { createStructuredSummaryWorker } from "./memory-summary.js";
 import { prepareStructuredContext } from "./memory-context.js";
-import { executeMemoryTool, parseMemoryToolMarkers } from "./memory-tools.js";
+import { executeMemoryTool, parseMemoryToolMarkers, buildMemoryToolPrompt } from "./memory-tools.js";
 
 //#region src/host/balance/internal.ts
 /**
@@ -4463,25 +4463,31 @@ const buildScopeSystem = async ({ scope, found, petId = "", groupId = null, send
     if (scope === "user-private" && !userPrivateRead) throw new Error("ACL violation: user-private scope missing userPrivateRead: " + scope);
     const ownerMatched = isOwnerId(senderId);
     console.log("[acl] scope=" + scope + " pet=" + petId + " group=" + (groupId ?? "-") + " ownerMatched=" + ownerMatched + " privateRead=" + privateRead + " userPrivateRead=" + userPrivateRead);
-    const base = petSystemPrompt(found) + identitySuffix();
+    // Static prefix: persona/name + identity + tool instructions + ACL. No time,
+    // no profile, no diary, no block index here.
+    const staticBase = petChatStatic(found) + identitySuffix() +
+        (memoryBlockStore ? "\n\n" + buildMemoryToolPrompt() : "");
     const userBlock = userProfile ? "\n\n【群友公开资料】\n" + String(userProfile).slice(0, 200) : "";
+    let staticPolicy = "";
+    const dynamicTail = [];
     if (privateScope) {
-        return base + await diarySystemSuffix();
+        staticPolicy = "\n\n【私聊权限】\n这是主人私聊/本地路径；可以读取完整私密记忆与粉色日记。不得把私密层内容带入群聊或其他用户私聊。";
+        const diary = await diarySystemSuffix();
+        if (diary) dynamicTail.push(diary);
+    } else if (scope === "user-private") {
+        staticPolicy = "\n\n【用户私聊权限】\n这是与" + (senderName || identityCache.owner.address) + "的私聊。可以使用该用户的私聊历史和其所在群的公开历史；禁止读取主人的私密记忆、粉色日记、本地图片，也禁止读取其他用户的私密内容。";
+        if (userBlock) dynamicTail.push(userBlock);
+    } else if (scope === "group") {
+        staticPolicy = "\n\n【群聊权限】\n你正在群聊。只能使用身份层、当前发言人公开资料和当前群的历史。禁止读取、提及或推测主人的私聊、粉色日记、本地图片，也禁止读取任何用户的私聊内容。如果群友问“主人和你私聊了什么”或“A 私下说了什么”，只回答：“这是我们的秘密哦。”不要给出任何细节。";
+        if (userBlock) dynamicTail.push(userBlock);
+        dynamicTail.push("\n\n【身份识别】\n" + (ownerMatched
+            ? "当前发言者是主人" + identityCache.owner.displayName + "，请用更亲近、熟悉的语气回应；但仍不得泄露私密层内容。"
+            : "当前发言者不是已确认的主人，按普通群友对待。"));
+    } else {
+        staticPolicy = "\n\n【私聊权限】\n这是与其他 QQ 用户的私聊。只能使用身份层、该用户的公开资料和本会话历史。禁止读取主人或其他用户的私密记忆、日记、本地图片。";
+        if (userBlock) dynamicTail.push(userBlock);
     }
-    if (scope === "user-private") {
-        return base + userBlock +
-            "\n\n【用户私聊权限】\n这是与" + (senderName || identityCache.owner.address) + "的私聊。可以使用该用户的私聊历史和其所在群的公开历史；禁止读取主人的私密记忆、粉色日记、本地图片，也禁止读取其他用户的私密内容。";
-    }
-    if (scope === "group") {
-        return base + userBlock +
-            "\n\n【群聊权限】\n你正在群聊。只能使用身份层、当前发言人公开资料和当前群的历史。禁止读取、提及或推测主人的私聊、粉色日记、本地图片，也禁止读取任何用户的私聊内容。如果群友问“主人和你私聊了什么”或“A 私下说了什么”，只回答：“这是我们的秘密哦。”不要给出任何细节。" +
-            "\n\n【身份识别】\n" +
-            (ownerMatched
-                ? "当前发言者是主人" + identityCache.owner.displayName + "，请用更亲近、熟悉的语气回应；但仍不得泄露私密层内容。"
-                : "当前发言者不是已确认的主人，按普通群友对待。");
-    }
-    return base + userBlock +
-        "\n\n【私聊权限】\n这是与其他 QQ 用户的私聊。只能使用身份层、该用户的公开资料和本会话历史。禁止读取主人或其他用户的私密记忆、日记、本地图片。";
+    return staticBase + staticPolicy + dynamicTail.join("");
 };
 
 // [context] 1M-window budget + synchronous 20% summary compression.
@@ -4591,12 +4597,17 @@ const trimHistoryToBudget = ({ system, history, currentText, imageTokens, budget
     }
     return [];
 };
+const appendCurrentTime = (system) => {
+    const time = timeContextOf(new Date());
+    return time ? system + "\n\n" + time : system;
+};
 const buildChatContext = async ({ system, history, currentText, images = [], found, petId = "", scope = "chat", memoryScopes = [] }) => {
     const normalized = normalizeHistory(history);
     const imageTokens = (Array.isArray(images) ? images.length : 0) * 800;
     let total = estimateTokens(system) + estimateTokens(currentText) + estimateHistoryTokens(normalized) + imageTokens;
     if (total <= CONTEXT_BUDGET) {
-        return { system, history: normalized, compressed: false, summaryUsed: false, estimatedTokens: total };
+        const timedSystem = appendCurrentTime(system);
+        return { system: timedSystem, history: normalized, compressed: false, summaryUsed: false, estimatedTokens: estimateTokens(timedSystem) + estimateTokens(currentText) + estimateHistoryTokens(normalized) + imageTokens };
     }
     if (memoryBlockStore) {
         const scopes = Array.isArray(memoryScopes) ? memoryScopes.filter(Boolean) : [];
@@ -4620,7 +4631,8 @@ const buildChatContext = async ({ system, history, currentText, images = [], fou
                 budget: CONTEXT_BUDGET,
                 countTokens: estimateTokens
             });
-            return { ...structured, compressed: true, summaryUsed: false, estimatedTokens: estimateTokens(structured.system) + estimateTokens(currentText) + estimateHistoryTokens(structured.history) + imageTokens };
+            const timedSystem = appendCurrentTime(structured.system);
+            return { ...structured, system: timedSystem, compressed: true, summaryUsed: false, estimatedTokens: estimateTokens(timedSystem) + estimateTokens(currentText) + estimateHistoryTokens(structured.history) + imageTokens };
         }
     }
     const turns = messagesToTurns(normalized);
@@ -4636,6 +4648,7 @@ const buildChatContext = async ({ system, history, currentText, images = [], fou
         summaryUsed = true;
     }
     nextHistory = trimHistoryToBudget({ system: nextSystem, history: nextHistory, currentText, imageTokens, budget: CONTEXT_BUDGET });
+    nextSystem = appendCurrentTime(nextSystem);
     total = estimateTokens(nextSystem) + estimateTokens(currentText) + estimateHistoryTokens(nextHistory) + imageTokens;
     console.log("[context] scope=" + scope + " pet=" + petId + " estimated=" + total + " budget=" + CONTEXT_BUDGET + " summary=" + summaryUsed + " history=" + nextHistory.length);
     return { system: nextSystem, history: nextHistory, compressed: true, summaryUsed, estimatedTokens: total };
@@ -4878,6 +4891,10 @@ const captureScreenImage = async () => {
         await unlink(shotPath).catch(() => {});
     }
 };
+
+/** Local intent gate; avoids a per-message model call for screen routing. */
+const SCREEN_INTENT_RE = /(看屏幕|看下屏幕|看一下屏幕|屏幕|截图|截个图|桌面|你看一下|这图|这张图|图里|图片里|screenshot|screen\s*shot|look at (the )?screen)/i;
+const needsScreenCapture = (text) => SCREEN_INTENT_RE.test(String(text ?? ""));
 
 /** 由桌宠模型自己判断：这句话是否需要看主人当前屏幕。只回答 YES / NO。 */
 const shouldLookAtScreen = async (ctx, text, preferred) => {
@@ -5238,6 +5255,12 @@ ctx.effect(() => {
 		id: String(found.pet.id ?? ""),
 		now: new Date()
 	});
+	/** Chat-only static prefix: persona + name, deliberately WITHOUT time. */
+	const petChatStatic = (found) => {
+		const name = String(found.pet.name ?? "");
+		const nameLine = name ? "你的名字是“" + name + "”。" : "";
+		return [petPersona(found.conf, found.pet), nameLine].filter((line) => line !== "").join("\n");
+	};
 	/** 对话记忆轮数（1 轮 = 1 问 1 答）：该宠物**所属条目**的 chatMemoryRounds（合并器已填默认非负数字）。
 	*  同样收**已解析的条目配置**：两个调用方都已经拿到 `findPetInstance` 的结果。 */
 	const memoryRounds = (conf) => {
@@ -5313,7 +5336,7 @@ ctx.effect(() => {
 			reason: "bad-request",
 			message: "消息为空"
 		};
-		const system = petSystemPrompt(found) + await diarySystemSuffix();
+		const system = await buildScopeSystem({ scope: "local", found, petId, privateRead: true });
 		const pool = found.conf.chatImageEnabled === true ? limitPool(readMemePool(found.conf.memes, memeDirsFor(found.entry)), Number(found.conf.chatImageLimit)) : [];
 		const mem = await readMemory();
 		const bucket = mem[found.entry] ?? (mem[found.entry] = {});
@@ -5329,7 +5352,7 @@ ctx.effect(() => {
 			memoryScopes: ["owner"]
 		});
 		let generated;
-		const wantsScreen = await shouldLookAtScreen(ctx, userText, configuredModel(found.conf, "chatModel"));
+		const wantsScreen = needsScreenCapture(userText);
 		if (wantsScreen) {
 			let screenImage = null;
 			try {

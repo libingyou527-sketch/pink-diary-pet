@@ -44,6 +44,12 @@
   - 超限时取最旧 20% 的完整 user/assistant 轮次，同步生成不超过 50 字的旧记忆摘要；
   - 摘要 5 秒超时或失败时，直接丢弃旧 20%，保证回复不被阻塞。
 
+- **Token 成本优化**
+  - 本地正则判断屏幕意图，普通消息不再额外调用一次 82-token 的识屏判断；
+  - System Prompt 固定前缀：人设 → 身份 → 记忆工具 → ACL；
+  - 时间、Profile、日记、block 索引、预检索结果全部后置；
+  - 每轮模型请求后打印 `prompt_tokens / completion_tokens / total_tokens / cache_hit_tokens`。
+
 - **记忆查看器**
   - DSH 侧栏查看 dsh-pet 对话；
   - 最近 10 条 + 加载更早；
