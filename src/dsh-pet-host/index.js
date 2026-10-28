@@ -4473,8 +4473,17 @@ const generateChatWithMemory = async ({ system, history, text, pool, images, fou
         results.push(await executeMemoryTool(call.name, call.args, { store: memoryBlockStore, scopes: memoryScopes }));
     }
     currentSystem += "\n\n【旧记忆工具结果】\n" + results.join("\n\n") +
-        "\n请基于这些旧记忆结果回答用户当前问题；不要编造结果里没有的内容。";
+        "\n现在工具结果已经返回。请直接用自然语言回答用户当前问题；不要输出任何 [[search_old_memory: ...]] 或 [[decompress_old_memory: ...]] 标记，也不要再请求工具。不要编造结果里没有的内容。";
     generated = await generateChat(ctx, currentSystem, history, text, pool, model, images);
+    if (!generated.ok) return generated;
+    const finalText = String(generated.text ?? "");
+    if (parseMemoryToolMarkers(finalText).length > 0) {
+        const cleaned = finalText
+            .replace(/\[\[\s*(?:search|decompress)_old_memory\s*:[^\]]*\]\]/gi, "")
+            .replace(/\n{3,}/g, "\n\n")
+            .trim();
+        return { ...generated, text: cleaned || results.join("\n\n") };
+    }
     return generated;
 };
 
