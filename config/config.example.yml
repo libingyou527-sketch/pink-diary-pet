@@ -1,0 +1,32 @@
+# Copy this file to config/config.yml and fill in your own values.
+# config/config.yml is git-ignored. Never commit real AppID/AppSecret.
+
+qq:
+  appId: "YOUR_QQ_BOT_APP_ID"
+  appSecret: "YOUR_QQ_BOT_APP_SECRET"
+  ownerOpenIds: []
+  # Optional: only these c2c openids share the owner's private layer.
+  sharedC2cIds: []
+
+paths:
+  # The directory is created automatically by the installer and at runtime.
+  diaryDir: "~/.dsh/pink-diary"
+  pictureDir: "~/.dsh/dsh-pet/pictures"
+  memoryDir: "~/.dsh/dsh-pet"
+
+context:
+  window: 1000000
+  compressionRatio: 0.8
+  summaryRatio: 0.2
+  summaryMaxChars: 50
+  summaryTimeoutMs: 5000
+
+memoryBlocks:
+  # Experimental: structured block ledger + background summaries.
+  # Keep false until the branch is reviewed and tested.
+  enabled: false
+  file: "~/.dsh/dsh-pet/context-blocks.json"
+
+profile:
+  # DSH Desktop profile name.
+  name: "desktop"

@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "记忆查看器",
+    "description": "在侧栏读取并展示 dsh-pet 的 memory.json 对话内容。"
+  }
+}

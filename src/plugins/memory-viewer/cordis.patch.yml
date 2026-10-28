@@ -1,0 +1,6 @@
+# dsh-pet-memory-viewer bundle patch: mounts the Host half that serves
+# ~/.dsh/dsh-pet/memory.json to the sidebar panel.
+- insert:
+    - id: dsh-pet-memory-viewer
+      name: dsh-pet-memory-viewer
+      required: false

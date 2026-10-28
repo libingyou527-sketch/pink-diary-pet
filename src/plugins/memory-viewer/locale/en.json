@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Memory Viewer",
+    "description": "Read and show the conversation stored in dsh-pet's memory.json from the sidebar."
+  }
+}

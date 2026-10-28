@@ -1,0 +1,53 @@
+﻿# Dependencies
+node_modules/
+
+# Local/private data
+.tmp/
+backup/
+**/backup-*/
+**/orig/
+**/patched/
+*.orig
+*.patched
+
+# Secrets and runtime config
+.env
+.env.*
+!.env.example
+config/config.yml
+config/config.local.*
+**/cordis.patch.yml.bak*
+**/cordis.patch.yml.bak-*
+
+# Pet memory / identity / logs
+identity.json
+memory.json
+user-memory.json
+user-group-memory.json
+user-profiles.json
+pet-qq-memory.json\ncontext-blocks.json
+pet-inbound.log
+*.log
+
+# Runtime data
+diary/
+pink-diary/
+pictures/
+*.sqlite
+*.db
+
+# Model / media assets (bring your own; see assets/README.md)
+assets/model/
+assets/**/*.webm
+assets/**/*.moc3
+assets/**/*.wpk
+assets/**/*.bin3
+assets/**/*.png
+*.wpk
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+

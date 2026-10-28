@@ -1,0 +1,31 @@
+# Third-Party Notices
+
+This repository contains modified source files derived from the following MIT
+licensed projects. Their copyright notices are retained here.
+
+## dsh-pet 0.3.8
+
+- Copyright (c) 2026 PC2005-cloud
+- License: MIT
+- Modified files live under `src/dsh-pet-host/`.
+
+## @tencent-connect/dsh-qqbot 0.5.2
+
+- Copyright (c) 2026 Tencent Connect
+- License: MIT
+- Modified files live under `src/qqbot/`.
+
+## @tencent-connect/qqbot-nodejs 1.0.5
+
+- Copyright (c) 2026 Tencent
+- License: MIT
+- Used as an upstream dependency; not vendored.
+
+## Live2D model / WebM assets
+
+The Live2D model referenced by the original private setup came from the Steam
+Workshop work of **RelySeven**. It is **not** part of this repository and is
+**not** covered by the MIT license. Do not redistribute or use it commercially
+without the model author's permission.
+
+This repository only licenses the code logic. Bring your own model/assets.
