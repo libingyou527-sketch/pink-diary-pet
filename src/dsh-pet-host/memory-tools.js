@@ -37,7 +37,7 @@ export const MEMORY_TOOL_DEFINITIONS = [
 export function buildMemoryToolPrompt() {
     return [
         "【旧记忆工具】",
-        "需要旧细节时，可输出 `[[search_old_memory: 关键词]]`，宿主会检索当前会话允许的旧记忆块并继续。",
+        "如果你觉得当前的上下文不够，可以输出 `[[search_old_memory: 关键词]]` 来查询旧记忆，系统会返回结果给你。",
         "需要原文时输出 `[[decompress_old_memory: b1]]`（可加 offset/limit）。",
         "不要编造旧记忆块中没有的内容。"
     ].join("\n");

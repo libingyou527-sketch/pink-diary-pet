@@ -9,7 +9,8 @@ export const name = 'dsh-pet-memory-viewer'
 const ROUTE = '/dsh-pet-memory'
 
 /** The file the dsh-pet plugin writes its long-term chat memory to. */
-const MEMORY_FILE = join(homedir(), '.dsh', 'dsh-pet', 'memory.json')
+const DSH_HOME = process.env.DSH_HOME || join(homedir(), '.dsh')
+const MEMORY_FILE = join(DSH_HOME, 'dsh-pet', 'memory.json')
 
 /**
  * Answer one JSON response. The panel treats `ok: false` as data, not as a
