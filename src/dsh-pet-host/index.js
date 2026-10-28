@@ -533,6 +533,31 @@ async function generateWhisper(ctx, system, meme, preferred) {
 	}
 	return last;
 }
+/** Log provider-reported token usage. Console is the requested surface; the
+ * local file keeps the same line inspectable when the host stdout is detached. */
+function logTokenUsage(usage, sel, kind = "chat") {
+	const count = (value) => {
+		const n = Number(value);
+		return Number.isFinite(n) && n >= 0 ? n : 0;
+	};
+	const prompt = count(usage?.inputTokens ?? usage?.prompt_tokens ?? usage?.input);
+	const completion = count(usage?.outputTokens ?? usage?.completion_tokens ?? usage?.output);
+	const cacheHit = count(usage?.cacheReadTokens ?? usage?.cache_read_input_tokens ?? usage?.cacheRead);
+	const cacheWrite = count(usage?.cacheWriteTokens ?? usage?.cache_creation_input_tokens ?? usage?.cacheWrite);
+	const total = count(usage?.totalTokens ?? usage?.total_tokens) || prompt + completion + cacheHit + cacheWrite;
+	const line = "[tokens] kind=" + kind + " provider=" + String(sel?.provider ?? "?") +
+		" model=" + String(sel?.model ?? "?") +
+		" prompt_tokens=" + prompt +
+		" completion_tokens=" + completion +
+		" total_tokens=" + total +
+		" cache_hit_tokens=" + cacheHit +
+		" cache_write_tokens=" + cacheWrite +
+		(usage ? "" : " (usage unavailable)");
+	console.log(line);
+	try {
+		appendFileSync(join(resolveDshHome(), "dsh-pet", "token-usage.log"), line + "\n", "utf8");
+	} catch {}
+}
 /** 用**一个**确定的 provider/model 跑一次生成（候选链的一环；失败原样返回结构化原因，不吞） */
 async function generateWith$1(ctx, llm, sel, system, meme) {
 	const deadline = AbortSignal.timeout(TIMEOUT_MS$1);
@@ -563,6 +588,7 @@ async function generateWith$1(ctx, llm, sel, system, meme) {
 			message: e instanceof Error ? e.message : String(e)
 		};
 	}
+	logTokenUsage(assembler.usage, sel, "llm");
 	const text = assembler.blocks().filter((b) => b.type === "text").map((b) => "text" in b ? b.text : "").join("").trim();
 	if (!text) return {
 		ok: false,
@@ -727,6 +753,7 @@ async function generateWith(ctx, llm, sel, system, history, userText, pool, imag
 			message: e instanceof Error ? e.message : String(e)
 		};
 	}
+	logTokenUsage(assembler.usage, sel, "llm");
 	const text = assembler.blocks().filter((b) => b.type === "text").map((b) => "text" in b ? b.text : "").join("").trim();
 	if (!text) return {
 		ok: false,
