@@ -5396,7 +5396,7 @@ ctx.effect(() => {
 			reason: "bad-request",
 			message: "消息为空"
 		};
-		const system = await buildScopeSystem({ scope: "local", found, petId, privateRead: true });
+		let system = await buildScopeSystem({ scope: "local", found, petId, privateRead: true });
 		const localVideos = Array.isArray(options.videos) ? options.videos.filter((video) => video && typeof video.path === "string" && video.path.trim()).slice(0, 1) : [];
 		if (localVideos.length > 0) {
 			system += "\n\n" + localVideos.map((video) => "[用户发送了一段视频，你可以使用 [[video_storyboard: " + String(video.id ?? "v1") + "]] 来查看分镜]").join("\n");
