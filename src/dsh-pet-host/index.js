@@ -5048,11 +5048,13 @@ const buildQqInput = async (packet) => {
             }
             imageIndex += 1;
         } else if (part.type === "video") {
-            videos.push({
+            const video = {
                 id: String(part.id ?? "v1"),
                 url: String(part.url ?? ""),
                 filename: String(part.filename ?? "video.mp4")
-            });
+            };
+            videos.push(video);
+            console.log("[dsh-pet] QQ video input id=" + video.id + " url=" + (video.url ? "yes" : "no") + " file=" + video.filename);
             text += "[视频]";
         }
     }
@@ -5067,7 +5069,7 @@ const buildQqInput = async (packet) => {
  * 主人白名单私聊与桌面聊天共用 memory.json。
  * 用 dsh-pet 现有的 withMemoryLock 串行，避免和桌面 /chat 并发写坏。
  */
-const chatWithPetShared = async (petId, text, images = [], imagePaths = []) => withMemoryLock(async () => {
+const chatWithPetShared = async (petId, text, images = [], imagePaths = [], videos = []) => withMemoryLock(async () => {
     const cfg = readAllConfig(configPaths);
     const found = findPetInstance(cfg, petId);
     if (!found) throw new Error("没有这只桌宠：" + petId);
@@ -5080,7 +5082,17 @@ const chatWithPetShared = async (petId, text, images = [], imagePaths = []) => w
             console.warn("[dsh-pet] QQ 图片持久化失败：" + (error?.message ?? error));
         }
     }
-    const system = await buildScopeSystem({ scope: "owner-private", found, petId, privateRead: true });
+    let system = await buildScopeSystem({ scope: "owner-private", found, petId, privateRead: true });
+    let imageList = Array.isArray(images) ? [...images] : [];
+    if (Array.isArray(videos) && videos.length > 0) {
+        const prepared = await prepareVideoAttachment(videos[0]);
+        if (!prepared.ok) {
+            console.warn("[video-storyboard] " + (prepared.error || "failed"));
+            return "[视频解析失败，请稍后再试]";
+        }
+        imageList = [...imageList, prepared.attachment];
+        system += "\n\n【视频分镜已生成】\n分镜图已经作为图片附件附在用户消息里；请直接看图回答，不要输出 [[video_storyboard: ...]] 标记。";
+    }
     const mem = await readMemory();
     const bucket = mem[found.entry] ?? (mem[found.entry] = {});
     const entry = bucket[petId] ?? (bucket[petId] = { messages: [] });
@@ -5089,13 +5101,13 @@ const chatWithPetShared = async (petId, text, images = [], imagePaths = []) => w
         system,
         history: entry.messages,
         currentText: text,
-        images,
+        images: imageList,
         found,
         petId,
         scope: "owner-private",
         memoryScopes: ["owner"]
     });
-    const generated = await generateChatWithMemory({ system: chatContext.system, history: chatContext.history, text, pool: [], images, found, memoryScopes: chatContext.scopes ?? ["owner"] });
+    const generated = await generateChatWithMemory({ system: chatContext.system, history: chatContext.history, text, pool: [], images: imageList, found, memoryScopes: chatContext.scopes ?? ["owner"], videos: [] });
     if (!generated.ok) throw new Error(generated.message ?? generated.reason);
     const now = Date.now();
     entry.messages.push({
@@ -5212,7 +5224,7 @@ const startQqBridge = () => {
         try {
             const reply = await runWithTimeout(
                 context.shared_memory === true
-                    ? chatWithPetShared(context.pet_id || "main", text, input.images, input.imagePaths)
+                    ? chatWithPetShared(context.pet_id || "main", text, input.images, input.imagePaths, input.videos ?? [])
                     : chatWithPetQQ(context.pet_id || "main", text, history, input.images, {
                         scope: context.scope,
                         groupId: context.group_id,
