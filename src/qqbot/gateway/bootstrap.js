@@ -132,10 +132,10 @@ async function maybeSendPetVoice(bot, target, text, config, limiter, logger) {
         try { unlinkSync(file); } catch {}
     }
 }
+export async function bootstrapGateway(ctx, agents, config, logger) {
     const manager = new SessionManager(ctx, agents, config, logger);
     // ── 初始化 QQ Bot SDK ──
     const userAgent = buildUserAgent();
-export async function bootstrapGateway(ctx, agents, config, logger) {
     const bot = new QQBot({
         appId: config.appId,
         appSecret: config.appSecret,
