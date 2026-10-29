@@ -1442,6 +1442,7 @@ const CHAT_CSS = [
 	".dsh-pet-chat-thumb{position:relative;width:48px;height:48px;border-radius:8px;overflow:hidden;background:rgba(0,0,0,.06)}",
 	".dsh-pet-chat-thumb img{width:100%;height:100%;object-fit:cover;display:block}",
 	".dsh-pet-chat-thumb.is-video{display:flex;align-items:center;justify-content:center;background:#eef2ff;color:#3451b2;font-size:11px;font-weight:600;text-align:center;overflow-wrap:anywhere}",
+	".dsh-pet-chat-video-status{display:none;padding:7px 10px 0;color:#3451b2;font-size:12px;line-height:1.4;white-space:normal;overflow-wrap:anywhere}",
 	".dsh-pet-chat-thumb button{position:absolute;right:0;top:0;width:16px;height:16px;border:0;border-radius:0 0 0 6px;background:rgba(0,0,0,.55);color:#fff;font-size:12px;line-height:16px;padding:0;cursor:pointer}",
 	".dsh-pet-chat.is-drop{outline:2px dashed rgba(59,130,246,.6);outline-offset:-3px}"
 ].join("");
@@ -1477,6 +1478,9 @@ function mountChatDialog(opts) {
 	const preview = document.createElement("div");
 	preview.className = "dsh-pet-chat-images";
 	preview.style.display = "none";
+	const videoStatus = document.createElement("div");
+	videoStatus.className = "dsh-pet-chat-video-status";
+	videoStatus.textContent = "[本地视频处理中...]";
 	const input = document.createElement("textarea");
 	input.className = "dsh-pet-chat-input";
 	input.placeholder = "说点什么…";
@@ -1500,6 +1504,7 @@ function mountChatDialog(opts) {
 	const err = document.createElement("div");
 	err.className = "dsh-pet-chat-err";
 	err.style.display = "none";
+	root.appendChild(videoStatus);
 	root.appendChild(preview);
 	root.appendChild(input);
 	root.appendChild(err);
@@ -1517,7 +1522,11 @@ function mountChatDialog(opts) {
 		reader.readAsDataURL(file);
 	});
 	const readVideoFile = (file) => new Promise((resolve, reject) => {
-		const path = String(file?.path ?? "");
+		let path = String(file?.path ?? "");
+		// Modern Electron removed File.path; DSH exposes the safe preload bridge.
+		if (!path && typeof window.__DSH_HOST_PATHS__?.pathFor === "function") {
+			try { path = String(window.__DSH_HOST_PATHS__.pathFor(file) || ""); } catch {}
+		}
 		if (!path) return reject(new Error("本地视频拖拽仅桌面版支持"));
 		if (!/\.(mp4|mov|mkv|webm)$/i.test(String(file.name ?? ""))) return reject(new Error("仅支持本地视频文件"));
 		resolve({ name: file.name || "video.mp4", path });
@@ -1525,6 +1534,7 @@ function mountChatDialog(opts) {
 	const renderImages = () => {
 		preview.innerHTML = "";
 		preview.style.display = (pendingImages.length || pendingVideos.length) ? "flex" : "none";
+		videoStatus.style.display = pendingVideos.length ? "block" : "none";
 		pendingImages.forEach((item, index) => {
 			const box = document.createElement("div");
 			box.className = "dsh-pet-chat-thumb";
@@ -1636,6 +1646,10 @@ function mountChatDialog(opts) {
 		input.disabled = true;
 		const images = pendingImages.map(({ name, mime, data }) => ({ name, mime, data }));
 		const videos = pendingVideos.map(({ name, path }) => ({ name, path }));
+		if (videos.length > 0) {
+			videoStatus.textContent = "[本地视频处理中...]";
+			videoStatus.style.display = "block";
+		}
 		sendChat(withPet, text, images, videos).then((state) => {
 			if (state.ok) {
 				close();

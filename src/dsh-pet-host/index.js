@@ -5436,15 +5436,24 @@ ctx.effect(() => {
 			}
 		}
 		const userText = String(text ?? "").trim() || (pictureMetas.length > 0 ? "[图片]" : (Array.isArray(options.videos) && options.videos.length > 0 ? "[视频]" : ""));
-		if (!userText && imageAttachments.length === 0) return {
+		const localVideos = Array.isArray(options.videos) ? options.videos.filter((video) => video && typeof video.path === "string" && video.path.trim()).slice(0, 1) : [];
+		let localImages = [...imageAttachments];
+		if (localVideos.length > 0) {
+			const prepared = await prepareVideoAttachment(localVideos[0]);
+			if (!prepared.ok) {
+				console.warn("[video-storyboard] " + (prepared.error || "failed"));
+				return { ok: true, text: "[视频解析失败，请稍后再试]" };
+			}
+			localImages = [...localImages, prepared.attachment];
+		}
+		if (!userText && localImages.length === 0) return {
 			ok: false,
 			reason: "bad-request",
 			message: "消息为空"
 		};
 		let system = await buildScopeSystem({ scope: "local", found, petId, privateRead: true });
-		const localVideos = Array.isArray(options.videos) ? options.videos.filter((video) => video && typeof video.path === "string" && video.path.trim()).slice(0, 1) : [];
 		if (localVideos.length > 0) {
-			system += "\n\n" + localVideos.map((video) => "[用户发送了一段视频，你可以使用 [[video_storyboard: " + String(video.id ?? "v1") + "]] 来查看分镜]").join("\n");
+			system += "\n\n【视频分镜已生成】\n分镜图已经作为图片附件附在用户消息里；请直接看图回答，不要输出 [[video_storyboard: ...]] 标记。";
 		}
 		const pool = found.conf.chatImageEnabled === true ? limitPool(readMemePool(found.conf.memes, memeDirsFor(found.entry)), Number(found.conf.chatImageLimit)) : [];
 		const mem = await readMemory();
@@ -5454,7 +5463,7 @@ ctx.effect(() => {
 			system,
 			history: entry.messages,
 			currentText: userText,
-			images: imageAttachments,
+			images: localImages,
 			found,
 			petId,
 			scope: "local",
@@ -5471,12 +5480,12 @@ ctx.effect(() => {
 				console.warn("[dsh-pet] 截屏失败：" + (error?.message ?? error));
 			}
 			if (screenImage) {
-				generated = await generateChatWithMemory({ system: chatContext.system + "\n\n【主人当前屏幕的截图已附在用户消息里，请直接看图回答；不要提截图、附件、OCR 或 AI。】", history: chatContext.history, text: userText, pool, images: [...imageAttachments, screenImage], found, memoryScopes: chatContext.scopes ?? ["owner"], videos: localVideos });
+				generated = await generateChatWithMemory({ system: chatContext.system + "\n\n【主人当前屏幕的截图已附在用户消息里，请直接看图回答；不要提截图、附件、OCR 或 AI。】", history: chatContext.history, text: userText, pool, images: [...localImages, screenImage], found, memoryScopes: chatContext.scopes ?? ["owner"], videos: [] });
 			} else {
-				generated = await generateChatWithMemory({ system: chatContext.system + "\n\n【本来想看一眼屏幕，但截屏失败了；请自然回答，不要提截图或失败。】", history: chatContext.history, text: userText, pool, images: imageAttachments, found, memoryScopes: chatContext.scopes ?? ["owner"], videos: localVideos });
+				generated = await generateChatWithMemory({ system: chatContext.system + "\n\n【本来想看一眼屏幕，但截屏失败了；请自然回答，不要提截图或失败。】", history: chatContext.history, text: userText, pool, images: localImages, found, memoryScopes: chatContext.scopes ?? ["owner"], videos: [] });
 			}
 		} else {
-			generated = await generateChatWithMemory({ system: chatContext.system, history: chatContext.history, text: userText, pool, images: imageAttachments, found, memoryScopes: chatContext.scopes ?? ["owner"], videos: localVideos });
+			generated = await generateChatWithMemory({ system: chatContext.system, history: chatContext.history, text: userText, pool, images: localImages, found, memoryScopes: chatContext.scopes ?? ["owner"], videos: [] });
 		}
 		if (!generated.ok) return generated;
 		const now = Date.now();
@@ -6930,7 +6939,7 @@ if (rest === "diary") {
 					const text = typeof parsed.text === "string" ? parsed.text.trim() : "";
 					const images = Array.isArray(parsed.images) ? parsed.images : [];
 					const videos = Array.isArray(parsed.videos)
-						? parsed.videos.filter((video) => video && typeof video.path === "string" && video.path.trim()).slice(0, 1)
+						? parsed.videos.filter((video) => video && typeof video.path === "string" && /\.(mp4|mov|mkv|webm)$/i.test(video.path.trim()) && existsSync(video.path.trim())).slice(0, 1)
 						: [];
 					if (!text && images.length === 0 && videos.length === 0) return {
 						kind: "json",
