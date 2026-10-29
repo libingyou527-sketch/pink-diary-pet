@@ -27,6 +27,14 @@ memoryBlocks:
   enabled: false
   file: "~/.dsh/dsh-pet/context-blocks.json"
 
+video:
+  # Optional: dsh-video-storyboard CLI adapter for QQ/local MP4.
+  storyboardBin: "C:/path/to/dsh-video-storyboard/bin/storyboard.mjs"
+  ffmpegPath: "C:/path/to/tools/ffmpeg/ffmpeg.exe"
+  ffprobePath: "C:/path/to/tools/ffmpeg/ffprobe.exe"
+  timeoutMs: 20000
+  workDir: "~/.dsh/dsh-pet/video-storyboard"
+
 profile:
   # DSH Desktop profile name.
   name: "desktop"

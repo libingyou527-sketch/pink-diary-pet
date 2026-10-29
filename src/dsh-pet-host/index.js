@@ -16,6 +16,7 @@ import { createMemoryBlockStore } from "./memory-blocks.js";
 import { createStructuredSummaryWorker } from "./memory-summary.js";
 import { prepareStructuredContext } from "./memory-context.js";
 import { executeMemoryTool, parseMemoryToolMarkers, buildMemoryToolPrompt } from "./memory-tools.js";
+import { createVideoStoryboard } from "./video-storyboard.js";
 
 //#region src/host/balance/internal.ts
 /**
@@ -4491,15 +4492,61 @@ const buildScopeSystem = async ({ scope, found, petId = "", groupId = null, send
 };
 
 // [context] 1M-window budget + synchronous 20% summary compression.
-const generateChatWithMemory = async ({ system, history, text, pool, images, found, memoryScopes = [] }) => {
-    if (!memoryBlockStore || !Array.isArray(memoryScopes) || memoryScopes.length === 0) {
-        return generateChat(ctx, system, history, text, pool, configuredModel(found.conf, "chatModel"), images);
-    }
+const VIDEO_STORYBOARD_MARKER_RE = /\[\[\s*video_storyboard\s*:\s*([^\]]+)\]\]/i;
+const stripVideoMarker = (generated) => {
+    const text = String(generated?.text ?? "");
+    if (!VIDEO_STORYBOARD_MARKER_RE.test(text)) return generated;
+    const cleaned = text.replace(VIDEO_STORYBOARD_MARKER_RE, "").replace(/\n{3,}/g, "\n\n").trim();
+    return { ...generated, text: cleaned || "[视频分镜已生成，但模型没有给出文字回复]" };
+};
+const generateChatWithMemory = async ({ system, history, text, pool, images, found, memoryScopes = [], videos = [] }) => {
     const model = configuredModel(found.conf, "chatModel");
+    let imageList = Array.isArray(images) ? [...images] : [];
+    if ((!memoryBlockStore || !Array.isArray(memoryScopes) || memoryScopes.length === 0) && videos.length === 0) {
+        return generateChat(ctx, system, history, text, pool, model, imageList);
+    }
     let currentSystem = system;
-    let generated = await generateChat(ctx, currentSystem, history, text, pool, model, images);
+    let generated = await generateChat(ctx, currentSystem, history, text, pool, model, imageList);
     if (!generated.ok) return generated;
+    const videoMatch = String(generated.text ?? "").match(VIDEO_STORYBOARD_MARKER_RE);
+    if (videoMatch) {
+        const videoId = videoMatch[1].trim();
+        const video = (Array.isArray(videos) ? videos : []).find((item) => String(item.id) === videoId);
+        if (!video) return { ok: true, text: "[视频解析失败，请稍后再试]" };
+        const storyboard = await createVideoStoryboard({
+            input: video.url || video.path,
+            binPath: runtimeConfig.videoStoryboardBin,
+            ffmpegPath: runtimeConfig.videoFfmpegPath,
+            ffprobePath: runtimeConfig.videoFfprobePath,
+            timeoutMs: runtimeConfig.videoStoryboardTimeoutMs,
+            outDir: runtimeConfig.videoWorkDir,
+            cells: 9,
+            logger: console
+        });
+        if (!storyboard.ok) {
+            console.warn("[video-storyboard] " + (storyboard.error || "failed"));
+            return { ok: true, text: "[视频解析失败，请稍后再试]" };
+        }
+        try {
+            const bytes = storyboard.bytes;
+            const attachment = await ctx.attachments.saveImage({
+                data: new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength),
+                mediaType: storyboard.mediaType,
+                name: storyboard.filename
+            });
+            imageList = [...imageList, attachment];
+        } catch (error) {
+            console.warn("[video-storyboard] attachment failed: " + (error?.message ?? error));
+            return { ok: true, text: "[视频解析失败，请稍后再试]" };
+        }
+        currentSystem += "\n\n【视频分镜已生成】\n分镜图已经作为图片附件附在用户消息里。请直接看图回答；不要输出 [[video_storyboard: ...]] 标记，也不要再请求工具。";
+        generated = await generateChat(ctx, currentSystem, history, text, pool, model, imageList);
+        if (!generated.ok) return generated;
+        generated = stripVideoMarker(generated);
+    }
+    if (!memoryBlockStore || !Array.isArray(memoryScopes) || memoryScopes.length === 0) return stripVideoMarker(generated);
     const calls = parseMemoryToolMarkers(generated.text);
+    if (calls.length === 0) return stripVideoMarker(generated);
     if (calls.length === 0) return generated;
     const results = [];
     for (const call of calls.slice(0, 2)) {
@@ -4507,17 +4554,18 @@ const generateChatWithMemory = async ({ system, history, text, pool, images, fou
     }
     currentSystem += "\n\n【旧记忆工具结果】\n" + results.join("\n\n") +
         "\n现在工具结果已经返回。请直接用自然语言回答用户当前问题；不要输出任何 [[search_old_memory: ...]] 或 [[decompress_old_memory: ...]] 标记，也不要再请求工具。不要编造结果里没有的内容。";
-    generated = await generateChat(ctx, currentSystem, history, text, pool, model, images);
+    generated = await generateChat(ctx, currentSystem, history, text, pool, model, imageList);
     if (!generated.ok) return generated;
     const finalText = String(generated.text ?? "");
-    if (parseMemoryToolMarkers(finalText).length > 0) {
+    if (parseMemoryToolMarkers(finalText).length > 0 || VIDEO_STORYBOARD_MARKER_RE.test(finalText)) {
         const cleaned = finalText
             .replace(/\[\[\s*(?:search|decompress)_old_memory\s*:[^\]]*\]\]/gi, "")
+            .replace(VIDEO_STORYBOARD_MARKER_RE, "")
             .replace(/\n{3,}/g, "\n\n")
             .trim();
         return { ...generated, text: cleaned || results.join("\n\n") };
     }
-    return generated;
+    return stripVideoMarker(generated);
 };
 
 const CONTEXT_WINDOW = Number(runtimeConfig.contextWindow) || 1_000_000;
@@ -4944,10 +4992,11 @@ const qqFaceEmoji = (id) => {
 /** 把 qqbot 的 content 数组转成桌宠的文本 + 图片附件；纯文本包走 packet.text。 */
 const buildQqInput = async (packet) => {
     const content = Array.isArray(packet.content) ? packet.content : null;
-    if (!content) return { text: String(packet.text ?? "").trim(), images: [], imagePaths: [] };
+    if (!content) return { text: String(packet.text ?? "").trim(), images: [], imagePaths: [], videos: [] };
     let text = "";
     const images = [];
     const imagePaths = [];
+    const videos = [];
     let imageIndex = 0;
     for (const part of content) {
         if (!part || typeof part !== "object") continue;
@@ -4972,12 +5021,20 @@ const buildQqInput = async (packet) => {
                 text += "[图片]";
             }
             imageIndex += 1;
+        } else if (part.type === "video") {
+            videos.push({
+                id: String(part.id ?? "v1"),
+                url: String(part.url ?? ""),
+                filename: String(part.filename ?? "video.mp4")
+            });
+            text += "[视频]";
         }
     }
     text = text.trim();
     if (!text && images.length > 0) text = "[图片]";
-    if (!text) return { text: String(packet.text ?? "").trim(), images, imagePaths };
-    return { text, images, imagePaths };
+    if (!text && videos.length > 0) text = "[视频]";
+    if (!text) return { text: String(packet.text ?? "").trim(), images, imagePaths, videos };
+    return { text, images, imagePaths, videos };
 };
 
 /**
@@ -5028,7 +5085,7 @@ const chatWithPetShared = async (petId, text, images = [], imagePaths = []) => w
 });
 
 /** 用 DSH 传来的 QQ history 生成回复；不写 dsh-pet 的 memory.json，不弹桌面气泡。 */
-const chatWithPetQQ = async (petId, text, history, images = [], scopeInfo = {}) => {
+const chatWithPetQQ = async (petId, text, history, images = [], scopeInfo = {}, videos = []) => {
     const cfg = readAllConfig(configPaths);
     const found = findPetInstance(cfg, petId);
     if (!found) throw new Error("没有这只桌宠：" + petId);
@@ -5036,7 +5093,7 @@ const chatWithPetQQ = async (petId, text, history, images = [], scopeInfo = {}) 
     const senderId = String(scopeInfo.senderId ?? "");
     const senderName = String(scopeInfo.senderName ?? "群友");
     const userProfile = senderId ? await getPublicProfile(senderId, senderName) : defaultUserProfile(senderName);
-    const system = await buildScopeSystem({
+    let system = await buildScopeSystem({
         scope,
         found,
         petId,
@@ -5046,6 +5103,9 @@ const chatWithPetQQ = async (petId, text, history, images = [], scopeInfo = {}) 
         userProfile,
         userPrivateRead: scope === "user-private"
     });
+    if (Array.isArray(videos) && videos.length > 0) {
+        system += "\n\n" + videos.map((video) => "[用户发送了一段视频，你可以使用 [[video_storyboard: " + video.id + "]] 来查看分镜]").join("\n");
+    }
     const external = (Array.isArray(history) ? history : [])
         .map((m) => ({
             role: m?.role === "assistant" ? "assistant" : "user",
@@ -5071,7 +5131,7 @@ const chatWithPetQQ = async (petId, text, history, images = [], scopeInfo = {}) 
         scope,
         memoryScopes: memoryScopes
     });
-    const generated = await generateChatWithMemory({ system: chatContext.system, history: chatContext.history, text, pool: [], images, found, memoryScopes });
+    const generated = await generateChatWithMemory({ system: chatContext.system, history: chatContext.history, text, pool: [], images, found, memoryScopes, videos });
     if (!generated.ok) throw new Error(generated.message ?? generated.reason);
     const now = Date.now();
     if (senderId) {
@@ -5114,7 +5174,7 @@ const startQqBridge = () => {
         const context = packet.context && typeof packet.context === "object" ? packet.context : {};
         const input = await buildQqInput(packet);
         const text = input.text;
-        if (!text && input.images.length === 0) return;
+        if (!text && input.images.length === 0 && (input.videos?.length ?? 0) === 0) return;
         const history = Array.isArray(packet.history) ? packet.history : [];
         try {
             const reply = await runWithTimeout(
@@ -5125,7 +5185,7 @@ const startQqBridge = () => {
                         groupId: context.group_id,
                         senderId: context.sender_id,
                         senderName: context.sender_name
-                    }),
+                    }, input.videos ?? []),
                 60000,
                 "AI 回复超时"
             );

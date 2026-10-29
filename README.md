@@ -50,6 +50,12 @@
   - 时间、Profile、日记、block 索引、预检索结果全部后置；
   - 每轮模型请求后打印 `prompt_tokens / completion_tokens / total_tokens / cache_hit_tokens`。
 
+- **视频分镜**
+  - QQ `video/mp4` 入站不下载整段视频，只记录 URL/ID 并先回 `[视频处理中...]`；
+  - 模型可用 `[[video_storyboard: v1]]` 请求分镜；
+  - 本地适配 `dsh-video-storyboard` CLI，输出一张 PNG 作为多模态附件；
+  - 20 秒超时/失败回 `[视频解析失败，请稍后再试]`。
+
 - **记忆查看器**
   - DSH 侧栏查看 dsh-pet 对话；
   - 最近 10 条 + 加载更早；

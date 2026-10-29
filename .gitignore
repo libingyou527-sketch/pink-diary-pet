@@ -36,7 +36,7 @@ pictures/
 *.sqlite
 *.db
 
-# Model / media assets (bring your own; see assets/README.md)
+# Local media tools\ntools/ffmpeg/\ntools/\n\n# Model / media assets (bring your own; see assets/README.md)
 assets/model/
 assets/**/*.webm
 assets/**/*.moc3
@@ -50,4 +50,9 @@ assets/**/*.png
 Thumbs.db
 .vscode/
 .idea/
+
+
+
+# Local media binaries
+tools/
 

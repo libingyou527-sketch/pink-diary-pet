@@ -248,10 +248,11 @@ async function handlePetInbound(mCtx, bot, config, logger, bridge, memory, limit
         return;
     }
     const hasImages = Array.isArray(msg.attachments) && msg.attachments.some(isInboundImage);
+    const hasVideos = Array.isArray(msg.attachments) && msg.attachments.some(isInboundVideo);
     let rawText = String(msg.content ?? "").trim();
     const attachmentCount = Array.isArray(msg.attachments) ? msg.attachments.length : 0;
-    logInbound(msg, { stage: "enter", hasImages, attachmentCount });
-    if (!rawText && !hasImages) {
+    logInbound(msg, { stage: "enter", hasImages, hasVideos, attachmentCount });
+    if (!rawText && !hasImages && !hasVideos) {
         // QQ 表情包/贴纸可能既没有 text，也没有 attachments；绝不能静默 return。
         rawText = "[用户发了一张图片]";
         logInbound(msg, { stage: "empty-nontext-placeholder" });
@@ -271,6 +272,13 @@ async function handlePetInbound(mCtx, bot, config, logger, bridge, memory, limit
     }
     if (!built.text && !built.content) {
         built = { text: "[用户发了一张图片]", content: null };
+    }
+    if (Array.isArray(built.videos) && built.videos.length > 0 && mCtx.replyTarget) {
+        try {
+            await sendResolvedMarkdown(bot, mCtx.replyTarget, "[视频处理中...]");
+        } catch (error) {
+            logger.warn("[pet] video placeholder failed: " + (error instanceof Error ? error.message : String(error)));
+        }
     }
     const prefix = scope === "group" ? "[" + senderName + "] " : "";
     let text = (prefix + built.text).trim();
@@ -353,6 +361,12 @@ function isInboundImage(att) {
     return contentType === "image" || contentType.startsWith("image/") || contentType === "sticker" || contentType === "mface";
 }
 
+function isInboundVideo(att) {
+    const contentType = String(att?.content_type ?? "").toLowerCase();
+    const filename = String(att?.filename ?? "").toLowerCase();
+    return contentType === "video" || contentType.startsWith("video/") || /\.(mp4|mov|mkv|webm)$/.test(filename);
+}
+
 function escapeRegExp(value) {
     return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -431,6 +445,21 @@ async function buildQqContent(msg, config, logger, imageDir, messageId, mCtx) {
     }
 
     const quote = mCtx?.state?.quote;
+    const videos = Array.isArray(msg.attachments) ? msg.attachments.filter(isInboundVideo) : [];
+    const hasVideo = videos.length > 0;
+    if (hasVideo) {
+        if (!hasFace && !hasImage && fallback) parts.push({ type: "text", text: fallback });
+        for (let i = 0; i < videos.length; i += 1) {
+            const att = videos[i];
+            parts.push({
+                type: "video",
+                id: "v" + (i + 1),
+                url: String(att.url ?? ""),
+                filename: String(att.filename ?? "video.mp4")
+            });
+            fallback += "[视频]";
+        }
+    }
     const quoteParts = [];
     let quoteFallback = "";
     let hasQuote = false;
@@ -478,11 +507,12 @@ async function buildQqContent(msg, config, logger, imageDir, messageId, mCtx) {
         fallback = quoteFallback + currentBlock + "[图片]".repeat(currentImages.length);
     }
 
-    const mixed = hasFace || hasImage || hasQuote;
+    const mixed = hasFace || hasImage || hasVideo || hasQuote;
     let text = (mixed ? fallback : raw).trim();
-    if (!text) text = "[用户发了一张图片]";
+    if (!text) text = hasVideo ? "[视频]" : "[用户发了一张图片]";
     return {
         text,
-        content: mixed ? parts : null
+        content: mixed ? parts : null,
+        videos
     };
 }

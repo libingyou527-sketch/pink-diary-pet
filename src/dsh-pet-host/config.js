@@ -30,6 +30,11 @@ export function loadRuntimeConfig(dshHome) {
         summaryMaxChars: Number(file.summaryMaxChars) || 50,
         summaryTimeoutMs: Number(file.summaryTimeoutMs) || 5000,
         memoryBlocksEnabled: process.env.PINK_MEMORY_BLOCKS === "1" || file.memoryBlocksEnabled === true,
-        memoryBlocksFile: file.memoryBlocksFile || join(dshHome, "dsh-pet", "context-blocks.json")
+        memoryBlocksFile: file.memoryBlocksFile || join(dshHome, "dsh-pet", "context-blocks.json"),
+        videoStoryboardBin: process.env.DSH_VIDEO_STORYBOARD_BIN || file.videoStoryboardBin || "",
+        videoFfmpegPath: process.env.DSH_FFMPEG_PATH || file.videoFfmpegPath || "",
+        videoFfprobePath: process.env.DSH_FFPROBE_PATH || file.videoFfprobePath || "",
+        videoStoryboardTimeoutMs: Number(file.videoStoryboardTimeoutMs) || 20000,
+        videoWorkDir: process.env.DSH_VIDEO_WORK_DIR || file.videoWorkDir || join(dshHome, "dsh-pet", "video-storyboard")
     };
 }
