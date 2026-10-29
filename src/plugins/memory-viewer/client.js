@@ -64,6 +64,42 @@ window.__ModuleLoader__.load({
       return response.json()
     }
 
+    const RVC_VOICE = {
+      baseUrl: 'http://127.0.0.1:4892',
+      model: 'E:\\edge File\\download\\%E6%98%94%E6%B6%9F%20%281%29.pth',
+      index: '',
+      baseVoice: 'zh-CN-XiaoxuanNeural',
+      f0Method: 'rmvpe',
+      indexRate: 0,
+    }
+
+    async function speakText(text) {
+      const value = String(text || '').trim()
+      if (!value) return
+      try {
+        const response = await fetch('/dsh-tts-api/speak', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', accept: 'application/json' },
+          body: JSON.stringify({ text: value, provider: 'rvc', voice: RVC_VOICE.baseVoice, custom: RVC_VOICE }),
+          signal: AbortSignal.timeout(10000),
+        })
+        console.log('[memory-tts] speak status=' + response.status)
+        if (!response.ok) return
+        const data = await response.json().catch(() => null)
+        if (!data || typeof data.url !== 'string') return
+        const audio = new Audio(data.url)
+        try {
+          await audio.play()
+          console.log('[memory-tts] playing ' + data.url)
+        } catch (error) {
+          console.warn('[memory-tts] play blocked', error)
+          window.alert('语音已生成，但浏览器拦截了自动播放。请再点一次消息旁的 🔊 按钮。')
+        }
+      } catch (error) {
+        console.warn('[memory-tts] speak failed', error)
+      }
+    }
+
     async function sendToPet(text, images = [], videos = []) {
       const body = { text }
       if (Array.isArray(images) && images.length > 0) body.images = images
@@ -309,6 +345,27 @@ window.__ModuleLoader__.load({
               },
             }, sourceLabel) : null,
             time ? h('span', null, time) : null,
+            !isUser && !isSystem && textOf(message.content).trim()
+              ? h('button', {
+                  type: 'button',
+                  title: '播放语音',
+                  'aria-label': '播放语音',
+                  onClick: (event) => {
+                    event.preventDefault()
+                    event.stopPropagation()
+                    void speakText(textOf(message.content))
+                  },
+                  style: {
+                    border: 0,
+                    background: 'transparent',
+                    cursor: 'pointer',
+                    padding: '0 2px',
+                    fontSize: 14,
+                    lineHeight: 1,
+                    opacity: 0.7,
+                  },
+                }, '🔊')
+              : null,
           ),
           h(
             'div',
