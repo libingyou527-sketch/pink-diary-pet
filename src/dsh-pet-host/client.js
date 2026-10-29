@@ -1423,7 +1423,41 @@ async function sendChat(baseUrl, text, images = [], videos = []) {
 		reason: o.reason === "provider-missing" || o.reason === "generate-error" || o.reason === "config-error" ? o.reason : "bad-request",
 		message: typeof o.message === "string" ? o.message : void 0
 	};
-	return { ok: true };
+	return { ok: true, text: typeof o.text === "string" ? o.text : "" };
+}
+const VOICE_ENABLED_KEY = "dsh-pet-voice-enabled";
+const RVC_VOICE = {
+	baseUrl: "http://127.0.0.1:4892",
+	model: "E:\\edge File\\download\\%E6%98%94%E6%B6%9F%20%281%29.pth",
+	index: "",
+	baseVoice: "zh-CN-XiaoxuanNeural",
+	f0Method: "rmvpe",
+	indexRate: 0
+};
+function isVoiceEnabled() {
+	try { return localStorage.getItem(VOICE_ENABLED_KEY) !== "0"; } catch { return true; }
+}
+async function playReplyVoice(text) {
+	if (!isVoiceEnabled() || !String(text || "").trim()) return;
+	try {
+		const res = await fetch("/dsh-tts-api/speak", {
+			method: "POST",
+			headers: { "content-type": "application/json", accept: "application/json" },
+			body: JSON.stringify({
+				text,
+				provider: "rvc",
+				voice: RVC_VOICE.baseVoice,
+				custom: RVC_VOICE
+			}),
+			signal: AbortSignal.timeout(10000)
+		});
+		if (!res.ok) return;
+		const data = await res.json().catch(() => null);
+		const url = data && typeof data.url === "string" ? data.url : "";
+		if (!url) return;
+		const audio = new Audio(url);
+		await audio.play().catch(() => {});
+	} catch {}
 }
 const CHAT_CSS = [
 	".dsh-pet-chat{position:fixed;z-index:2147483001;width:160px;max-width:80vw;",
@@ -1652,6 +1686,7 @@ function mountChatDialog(opts) {
 		}
 		sendChat(withPet, text, images, videos).then((state) => {
 			if (state.ok) {
+				void playReplyVoice(state.text);
 				close();
 				if (onSent) onSent();
 			} else {
@@ -2374,6 +2409,8 @@ const zh = {
 	extraPetsHint: "另 {n} 只额外宠物由 pet/ 目录文件定义（<名>-config.json + <名>-animation/ + <名>-memes/），它们不在此列表——改文件后浏览器刷新页面、桌面端右键「重载配置」即可生效。",
 	notifyToggle: "系统通知",
 	notifyToggleHint: "对话完成 / 生成失败 / 权限申请 / 用户选择，在窗口失焦时弹出系统级通知（桌面右下角）。",
+	voiceToggle: "语音朗读",
+	voiceToggleHint: "开启后，桌宠回答会异步生成 RVC 语音并自动播放；文字仍然先显示。关闭后完全不请求语音。",
 	whisperImageToggle: "碎碎念配图",
 	whisperImageToggleHint: "碎碎念时从表情包池随机抽一张，连同那句话一起显示（图片映射在配置文件顶层 memes）。token：碎碎念本来就每次生成都要调一次模型，配图只是把抽中那张的名称+描述（约 100 字符 / ≈60 token）加进同一次请求，增量可忽略。",
 	chatImageToggle: "对话配图",
@@ -2526,6 +2563,8 @@ const en = {
 	extraPetsHint: "{n} extra pet(s) are file-defined in the pet/ directory (<name>-config.json + <name>-animation/ + <name>-memes/). They are not in this list — after editing the files, refresh the page (browser) or right-click a desktop pet → \"Reload config\".",
 	notifyToggle: "System notifications",
 	notifyToggleHint: "OS-level toasts (bottom-right of the desktop) for conversation completion, failures, permission requests, and questions — only while this window is unfocused.",
+	voiceToggle: "Voice playback",
+	voiceToggleHint: "After the reply text appears, generate RVC speech asynchronously and play it automatically. Off means no speech request at all.",
 	whisperImageToggle: "Whisper images",
 	whisperImageToggleHint: "Attach one random meme from the pool to each whisper line (image mapping lives in the top-level `memes` config field). Tokens: a whisper already calls the model every cycle, so the image only appends the name + description of that one meme (~100 chars / ~60 tokens) to the same request — negligible.",
 	chatImageToggle: "Chat images",
@@ -2981,6 +3020,7 @@ function makePetConfigSection(rt) {
 			fetch("/dsh-pet-7340/config/meta").then((r) => r.ok ? r.json() : null).then((p) => setPaths(p)).catch(() => console.warn("[dsh-pet] 读取配置文件路径失败"));
 		}, []);
 		const [notifyEnabled$1, setNotifyEnabled] = useState(true);
+		const [voiceEnabled, setVoiceEnabled] = useState(() => isVoiceEnabled());
 		const [whisperImage, setWhisperImage] = useState(false);
 		const [chatImage, setChatImage] = useState(false);
 		const [confineScreen, setConfineScreen] = useState(false);
@@ -3501,6 +3541,10 @@ function makePetConfigSection(rt) {
 						className: "dsh-pet-cfg__grid4",
 						children: [
 							toggleCell("notifyToggle", notifyEnabled$1, busy, (v) => void toggleNotify(v)),
+							toggleCell("voiceToggle", voiceEnabled, busy, (v) => {
+								setVoiceEnabled(v);
+								try { localStorage.setItem(VOICE_ENABLED_KEY, v ? "1" : "0"); } catch {}
+							}),
 							toggleCell("whisperImageToggle", whisperImage, busy, setWhisperImage),
 							toggleCell("chatImageToggle", chatImage, busy, setChatImage),
 							toggleCell("confineToggle", confineScreen, busy, setConfineScreen, true)

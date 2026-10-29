@@ -8,8 +8,8 @@ import { chunkMarkdownText } from "../transport/chunker.js";
 import { PetBridge } from "../pet-bridge/server.js";
 import { QqMemory } from "../pet-bridge/memory.js";
 import { processInboundImage } from "../pet-bridge/image.js";
-import { appendFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { appendFileSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { QuestionChannel } from "../features/question-channel.js";
 import { ApprovalChannel } from "../features/approval-channel.js";
@@ -41,10 +41,101 @@ function dispatchInteraction(event, manager) {
         return manager.approvalChannel?.handleInteraction(event) ?? false;
     return false;
 }
-export async function bootstrapGateway(ctx, agents, config, logger) {
+function readRvcSettings() {
+    try {
+        const file = join(homedir(), ".dsh", "tts-rvc", "settings.json");
+        const data = JSON.parse(readFileSync(file, "utf8"));
+        return data && data.rvc && typeof data.rvc === "object" ? data.rvc : {};
+    } catch {
+        return {};
+    }
+}
+
+function wavDurationSeconds(buffer) {
+    try {
+        if (buffer.length < 44 || buffer.toString("ascii", 0, 4) !== "RIFF") return 0;
+        const channels = buffer.readUInt16LE(22);
+        const rate = buffer.readUInt32LE(24);
+        const bits = buffer.readUInt16LE(34);
+        const dataBytes = buffer.length - 44;
+        if (!channels || !rate || !bits) return 0;
+        return dataBytes / (channels * rate * (bits / 8));
+    } catch {
+        return 0;
+    }
+}
+
+async function synthesizePetVoice(text, config, logger) {
+    const api = String(config.ttsApiUrl || process.env.DSH_TTS_API_URL || "http://127.0.0.1:52930").replace(/\/+$/, "");
+    const rvc = readRvcSettings();
+    if (!rvc.model) return null;
+    let response;
+    try {
+        response = await fetch(api + "/dsh-tts-api/speak", {
+            method: "POST",
+            headers: { "content-type": "application/json", accept: "application/json" },
+            body: JSON.stringify({
+                text,
+                provider: "rvc",
+                voice: rvc.baseVoice || "zh-CN-XiaoxuanNeural",
+                custom: {
+                    baseUrl: rvc.baseUrl || "http://127.0.0.1:4892",
+                    model: rvc.model,
+                    index: rvc.index || "",
+                    baseVoice: rvc.baseVoice || "zh-CN-XiaoxuanNeural",
+                    f0Method: "rmvpe",
+                    indexRate: 0,
+                    f0UpKey: 0,
+                    resampleSr: 40000,
+                    rmsMixRate: 0.25,
+                    protect: 0.33,
+                    filterRadius: 3
+                }
+            }),
+            signal: AbortSignal.timeout(10000)
+        });
+    } catch (error) {
+        logger?.debug?.("[pet] voice synth skipped: " + (error?.message ?? error));
+        return null;
+    }
+    if (!response.ok) return null;
+    const data = await response.json().catch(() => null);
+    const url = data && typeof data.url === "string" ? data.url : "";
+    if (!url) return null;
+    try {
+        const audioResponse = await fetch(/^https?:\/\//i.test(url) ? url : api + url, {
+            signal: AbortSignal.timeout(10000)
+        });
+        if (!audioResponse.ok) return null;
+        const buffer = Buffer.from(await audioResponse.arrayBuffer());
+        if (buffer.length < 44) return null;
+        if (wavDurationSeconds(buffer) > 60) return null;
+        const file = join(tmpdir(), "dsh-pet-voice-" + Date.now() + "-" + Math.random().toString(36).slice(2, 8) + ".wav");
+        writeFileSync(file, buffer);
+        return file;
+    } catch (error) {
+        logger?.debug?.("[pet] voice audio fetch skipped: " + (error?.message ?? error));
+        return null;
+    }
+}
+
+async function maybeSendPetVoice(bot, target, text, config, limiter, logger) {
+    if (!text || !String(text).trim()) return;
+    const file = await synthesizePetVoice(String(text), config, logger);
+    if (!file) return;
+    try {
+        await bot.sendVoice(resolveReplyTarget(target, limiter, false), { localPath: file });
+        logger?.debug?.("[pet] voice sent");
+    } catch (error) {
+        logger?.warn?.("[pet] voice send failed: " + (error?.message ?? error));
+    } finally {
+        try { unlinkSync(file); } catch {}
+    }
+}
     const manager = new SessionManager(ctx, agents, config, logger);
     // ── 初始化 QQ Bot SDK ──
     const userAgent = buildUserAgent();
+export async function bootstrapGateway(ctx, agents, config, logger) {
     const bot = new QQBot({
         appId: config.appId,
         appSecret: config.appSecret,
@@ -81,6 +172,7 @@ export async function bootstrapGateway(ctx, agents, config, logger) {
                 for (const chunk of chunks) {
                     await sendResolvedMarkdown(bot, resolveReplyTarget(target, petReplyLimiter, true), chunk);
                 }
+                void maybeSendPetVoice(bot, target, text, config, petReplyLimiter, logger);
             },
             onSent: async (context, text) => {
                 await petMemory.append(context.conversation_id, {
