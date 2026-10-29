@@ -273,13 +273,6 @@ async function handlePetInbound(mCtx, bot, config, logger, bridge, memory, limit
     if (!built.text && !built.content) {
         built = { text: "[用户发了一张图片]", content: null };
     }
-    if (Array.isArray(built.videos) && built.videos.length > 0 && mCtx.replyTarget) {
-        try {
-            await sendResolvedMarkdown(bot, mCtx.replyTarget, "[视频处理中...]");
-        } catch (error) {
-            logger.warn("[pet] video placeholder failed: " + (error instanceof Error ? error.message : String(error)));
-        }
-    }
     const prefix = scope === "group" ? "[" + senderName + "] " : "";
     let text = (prefix + built.text).trim();
     let content = built.content;
