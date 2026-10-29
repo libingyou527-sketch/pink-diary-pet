@@ -66,7 +66,7 @@ function wavDurationSeconds(buffer) {
 }
 
 async function synthesizePetVoice(text, config, logger) {
-    const api = String(config.ttsApiUrl || process.env.DSH_TTS_API_URL || "http://127.0.0.1:52930").replace(/\/+$/, "");
+    const api = String(config.ttsApiUrl || process.env.DSH_TTS_API_URL || "http://127.0.0.1:51904").replace(/\/+$/, "");
     const rvc = readRvcSettings();
     if (!rvc.model) return null;
     let response;
