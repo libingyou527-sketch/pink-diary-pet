@@ -4528,12 +4528,14 @@ const stripVideoMarker = (generated) => {
 };
 const generateChatWithMemory = async ({ system, history, text, pool, images, found, memoryScopes = [], videos = [] }) => {
     const model = configuredModel(found.conf, "chatModel");
+    const clock = timeContextOf(new Date());
+    const timedText = clock ? text + "\n\n[系统时间：" + clock + "，请据此回复]" : text;
     let imageList = Array.isArray(images) ? [...images] : [];
     if ((!memoryBlockStore || !Array.isArray(memoryScopes) || memoryScopes.length === 0) && videos.length === 0) {
-        return generateChat(ctx, system, history, text, pool, model, imageList);
+        return generateChat(ctx, system, history, timedText, pool, model, imageList);
     }
     let currentSystem = system;
-    let generated = await generateChat(ctx, currentSystem, history, text, pool, model, imageList);
+    let generated = await generateChat(ctx, currentSystem, history, timedText, pool, model, imageList);
     if (!generated.ok) return generated;
     const videoMatch = String(generated.text ?? "").match(VIDEO_STORYBOARD_MARKER_RE);
     if (videoMatch) {
@@ -4567,7 +4569,7 @@ const generateChatWithMemory = async ({ system, history, text, pool, images, fou
             return { ok: true, text: "[视频解析失败，请稍后再试]" };
         }
         currentSystem += "\n\n【视频分镜已生成】\n分镜图已经作为图片附件附在用户消息里。请直接看图回答；不要输出 [[video_storyboard: ...]] 标记，也不要再请求工具。";
-        generated = await generateChat(ctx, currentSystem, history, text, pool, model, imageList);
+        generated = await generateChat(ctx, currentSystem, history, timedText, pool, model, imageList);
         if (!generated.ok) return generated;
         generated = stripVideoMarker(generated);
     }
@@ -4581,7 +4583,7 @@ const generateChatWithMemory = async ({ system, history, text, pool, images, fou
     }
     currentSystem += "\n\n【旧记忆工具结果】\n" + results.join("\n\n") +
         "\n现在工具结果已经返回。请直接用自然语言回答用户当前问题；不要输出任何 [[search_old_memory: ...]] 或 [[decompress_old_memory: ...]] 标记，也不要再请求工具。不要编造结果里没有的内容。";
-    generated = await generateChat(ctx, currentSystem, history, text, pool, model, imageList);
+    generated = await generateChat(ctx, currentSystem, history, timedText, pool, model, imageList);
     if (!generated.ok) return generated;
     const finalText = String(generated.text ?? "");
     if (parseMemoryToolMarkers(finalText).length > 0 || VIDEO_STORYBOARD_MARKER_RE.test(finalText)) {
@@ -4672,17 +4674,12 @@ const trimHistoryToBudget = ({ system, history, currentText, imageTokens, budget
     }
     return [];
 };
-const appendCurrentTime = (system) => {
-    const time = timeContextOf(new Date());
-    return time ? system + "\n\n" + time : system;
-};
 const buildChatContext = async ({ system, history, currentText, images = [], found, petId = "", scope = "chat", memoryScopes = [] }) => {
     const normalized = normalizeHistory(history);
     const imageTokens = (Array.isArray(images) ? images.length : 0) * 800;
     let total = estimateTokens(system) + estimateTokens(currentText) + estimateHistoryTokens(normalized) + imageTokens;
     if (total <= CONTEXT_BUDGET) {
-        const timedSystem = appendCurrentTime(system);
-        return { system: timedSystem, history: normalized, compressed: false, summaryUsed: false, estimatedTokens: estimateTokens(timedSystem) + estimateTokens(currentText) + estimateHistoryTokens(normalized) + imageTokens };
+        return { system, history: normalized, compressed: false, summaryUsed: false, estimatedTokens: total };
     }
     if (memoryBlockStore) {
         const scopes = Array.isArray(memoryScopes) ? memoryScopes.filter(Boolean) : [];
@@ -4706,7 +4703,7 @@ const buildChatContext = async ({ system, history, currentText, images = [], fou
                 budget: CONTEXT_BUDGET,
                 countTokens: estimateTokens
             });
-            const timedSystem = appendCurrentTime(structured.system);
+            const timedSystem = structured.system;
             return { ...structured, system: timedSystem, compressed: true, summaryUsed: false, estimatedTokens: estimateTokens(timedSystem) + estimateTokens(currentText) + estimateHistoryTokens(structured.history) + imageTokens };
         }
     }
@@ -4723,7 +4720,6 @@ const buildChatContext = async ({ system, history, currentText, images = [], fou
         summaryUsed = true;
     }
     nextHistory = trimHistoryToBudget({ system: nextSystem, history: nextHistory, currentText, imageTokens, budget: CONTEXT_BUDGET });
-    nextSystem = appendCurrentTime(nextSystem);
     total = estimateTokens(nextSystem) + estimateTokens(currentText) + estimateHistoryTokens(nextHistory) + imageTokens;
     console.log("[context] scope=" + scope + " pet=" + petId + " estimated=" + total + " budget=" + CONTEXT_BUDGET + " summary=" + summaryUsed + " history=" + nextHistory.length);
     return { system: nextSystem, history: nextHistory, compressed: true, summaryUsed, estimatedTokens: total };
