@@ -1437,6 +1437,23 @@ const RVC_VOICE = {
 function isVoiceEnabled() {
 	try { return localStorage.getItem(VOICE_ENABLED_KEY) !== "0"; } catch { return true; }
 }
+function showVoiceFallback(url) {
+	try {
+		const old = document.querySelector(".dsh-pet-voice-fallback");
+		if (old) old.remove();
+		const button = document.createElement("button");
+		button.className = "dsh-pet-voice-fallback";
+		button.textContent = "点击开启语音";
+		button.style.cssText = "position:fixed;right:18px;bottom:18px;z-index:2147483002;border:1px solid rgba(52,81,178,.35);border-radius:999px;padding:8px 14px;background:#eef2ff;color:#3451b2;font:inherit;font-size:13px;cursor:pointer;box-shadow:0 6px 20px rgba(0,0,0,.18)";
+		button.addEventListener("click", () => {
+			button.remove();
+			const audio = new Audio(url);
+			void audio.play().catch((error) => console.warn("[dsh-pet-tts] play after click failed", error));
+		});
+		document.body.appendChild(button);
+		setTimeout(() => button.remove(), 15000);
+	} catch {}
+}
 async function playReplyVoice(text) {
 	if (!isVoiceEnabled() || !String(text || "").trim()) return;
 	try {
@@ -1451,13 +1468,25 @@ async function playReplyVoice(text) {
 			}),
 			signal: AbortSignal.timeout(10000)
 		});
+		console.log("[dsh-pet-tts] speak status=" + res.status);
 		if (!res.ok) return;
 		const data = await res.json().catch(() => null);
 		const url = data && typeof data.url === "string" ? data.url : "";
-		if (!url) return;
+		if (!url) {
+			console.warn("[dsh-pet-tts] speak returned no url", data);
+			return;
+		}
 		const audio = new Audio(url);
-		await audio.play().catch(() => {});
-	} catch {}
+		try {
+			await audio.play();
+			console.log("[dsh-pet-tts] playing " + url);
+		} catch (error) {
+			console.warn("[dsh-pet-tts] autoplay blocked; showing click fallback", error);
+			showVoiceFallback(url);
+		}
+	} catch (error) {
+		console.warn("[dsh-pet-tts] speak failed", error);
+	}
 }
 const CHAT_CSS = [
 	".dsh-pet-chat{position:fixed;z-index:2147483001;width:160px;max-width:80vw;",

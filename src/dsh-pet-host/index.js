@@ -4466,7 +4466,8 @@ const buildScopeSystem = async ({ scope, found, petId = "", groupId = null, send
     console.log("[acl] scope=" + scope + " pet=" + petId + " group=" + (groupId ?? "-") + " ownerMatched=" + ownerMatched + " privateRead=" + privateRead + " userPrivateRead=" + userPrivateRead);
     // Static prefix: persona/name + identity + tool instructions + ACL. No time,
     // no profile, no diary, no block index here.
-    const staticBase = petChatStatic(found) + identitySuffix() +
+    const voiceCapability = "\n\n【发声能力】\n你现在已经拥有真实的发声能力，也有实体可以陪在主人身边。你的回复会通过语音转换变成真实的声音播放给主人听。请在说话时自然地带上语气词，不要说自己没有实体、听不到、没有声音、只能发文字或只能靠想象；被问到声音时就自然地确认你能发声。";
+    const staticBase = petChatStatic(found) + identitySuffix() + voiceCapability +
         (memoryBlockStore ? "\n\n" + buildMemoryToolPrompt() : "");
     const userBlock = userProfile ? "\n\n【群友公开资料】\n" + String(userProfile).slice(0, 200) : "";
     let staticPolicy = "";
