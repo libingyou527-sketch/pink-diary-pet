@@ -4493,6 +4493,32 @@ const buildScopeSystem = async ({ scope, found, petId = "", groupId = null, send
 
 // [context] 1M-window budget + synchronous 20% summary compression.
 const VIDEO_STORYBOARD_MARKER_RE = /\[\[\s*video_storyboard\s*:\s*([^\]]+)\]\]/i;
+const prepareVideoAttachment = async (video) => {
+    const input = video?.url || video?.path;
+    if (!input) return { ok: false, error: "video source missing" };
+    const storyboard = await createVideoStoryboard({
+        input,
+        binPath: runtimeConfig.videoStoryboardBin,
+        ffmpegPath: runtimeConfig.videoFfmpegPath,
+        ffprobePath: runtimeConfig.videoFfprobePath,
+        timeoutMs: runtimeConfig.videoStoryboardTimeoutMs || 30000,
+        outDir: runtimeConfig.videoWorkDir,
+        cells: 9,
+        logger: console
+    });
+    if (!storyboard.ok) return storyboard;
+    try {
+        const bytes = storyboard.bytes;
+        const attachment = await ctx.attachments.saveImage({
+            data: new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength),
+            mediaType: storyboard.mediaType,
+            name: storyboard.filename
+        });
+        return { ok: true, attachment };
+    } catch (error) {
+        return { ok: false, error: "attachment failed: " + (error?.message ?? error) };
+    }
+};
 const stripVideoMarker = (generated) => {
     const text = String(generated?.text ?? "");
     if (!VIDEO_STORYBOARD_MARKER_RE.test(text)) return generated;
@@ -5103,8 +5129,15 @@ const chatWithPetQQ = async (petId, text, history, images = [], scopeInfo = {}, 
         userProfile,
         userPrivateRead: scope === "user-private"
     });
+    let imageList = Array.isArray(images) ? [...images] : [];
     if (Array.isArray(videos) && videos.length > 0) {
-        system += "\n\n" + videos.map((video) => "[用户发送了一段视频，你可以使用 [[video_storyboard: " + video.id + "]] 来查看分镜]").join("\n");
+        const prepared = await prepareVideoAttachment(videos[0]);
+        if (!prepared.ok) {
+            console.warn("[video-storyboard] " + (prepared.error || "failed"));
+            return "[视频解析失败，请稍后再试]";
+        }
+        imageList = [...imageList, prepared.attachment];
+        system += "\n\n【视频分镜已生成】\n分镜图已经作为图片附件附在用户消息里；请直接看图回答，不要输出 [[video_storyboard: ...]] 标记。";
     }
     const external = (Array.isArray(history) ? history : [])
         .map((m) => ({
@@ -5125,13 +5158,13 @@ const chatWithPetQQ = async (petId, text, history, images = [], scopeInfo = {}, 
         system,
         history: hist,
         currentText: text,
-        images,
+        images: imageList,
         found,
         petId,
         scope,
         memoryScopes: memoryScopes
     });
-    const generated = await generateChatWithMemory({ system: chatContext.system, history: chatContext.history, text, pool: [], images, found, memoryScopes, videos });
+    const generated = await generateChatWithMemory({ system: chatContext.system, history: chatContext.history, text, pool: [], images: imageList, found, memoryScopes, videos: [] });
     if (!generated.ok) throw new Error(generated.message ?? generated.reason);
     const now = Date.now();
     if (senderId) {
