@@ -1405,11 +1405,14 @@ const TOOLTIP_CSS = [
 //#endregion
 //#region src/shared/chat.ts
 const SEND_TIMEOUT_MS = 6e4;
-async function sendChat(baseUrl, text, images = []) {
+async function sendChat(baseUrl, text, images = [], videos = []) {
+	const payload = { text };
+	if (Array.isArray(images) && images.length > 0) payload.images = images;
+	if (Array.isArray(videos) && videos.length > 0) payload.videos = videos;
 	const res = await fetch(baseUrl, {
 		method: "POST",
 		headers: { "content-type": "application/json" },
-		body: JSON.stringify(Array.isArray(images) && images.length > 0 ? { text, images } : { text }),
+		body: JSON.stringify(payload),
 		signal: AbortSignal.timeout(SEND_TIMEOUT_MS)
 	});
 	const raw = await res.json().catch(() => null);
@@ -1438,6 +1441,7 @@ const CHAT_CSS = [
 	".dsh-pet-chat-images{display:flex;gap:6px;padding:7px 9px 0;flex-wrap:wrap}",
 	".dsh-pet-chat-thumb{position:relative;width:48px;height:48px;border-radius:8px;overflow:hidden;background:rgba(0,0,0,.06)}",
 	".dsh-pet-chat-thumb img{width:100%;height:100%;object-fit:cover;display:block}",
+	".dsh-pet-chat-thumb.is-video{display:flex;align-items:center;justify-content:center;background:#eef2ff;color:#3451b2;font-size:11px;font-weight:600;text-align:center;overflow-wrap:anywhere}",
 	".dsh-pet-chat-thumb button{position:absolute;right:0;top:0;width:16px;height:16px;border:0;border-radius:0 0 0 6px;background:rgba(0,0,0,.55);color:#fff;font-size:12px;line-height:16px;padding:0;cursor:pointer}",
 	".dsh-pet-chat.is-drop{outline:2px dashed rgba(59,130,246,.6);outline-offset:-3px}"
 ].join("");
@@ -1469,6 +1473,7 @@ function mountChatDialog(opts) {
 	const root = document.createElement("div");
 	root.className = "dsh-pet-chat";
 	const pendingImages = [];
+	const pendingVideos = [];
 	const preview = document.createElement("div");
 	preview.className = "dsh-pet-chat-images";
 	preview.style.display = "none";
@@ -1511,9 +1516,15 @@ function mountChatDialog(opts) {
 		reader.onerror = () => reject(new Error("读取图片失败"));
 		reader.readAsDataURL(file);
 	});
+	const readVideoFile = (file) => new Promise((resolve, reject) => {
+		const path = String(file?.path ?? "");
+		if (!path) return reject(new Error("本地视频拖拽仅桌面版支持"));
+		if (!/\.(mp4|mov|mkv|webm)$/i.test(String(file.name ?? ""))) return reject(new Error("仅支持本地视频文件"));
+		resolve({ name: file.name || "video.mp4", path });
+	});
 	const renderImages = () => {
 		preview.innerHTML = "";
-		preview.style.display = pendingImages.length ? "flex" : "none";
+		preview.style.display = (pendingImages.length || pendingVideos.length) ? "flex" : "none";
 		pendingImages.forEach((item, index) => {
 			const box = document.createElement("div");
 			box.className = "dsh-pet-chat-thumb";
@@ -1534,15 +1545,35 @@ function mountChatDialog(opts) {
 			box.appendChild(rm);
 			preview.appendChild(box);
 		});
+		pendingVideos.forEach((item, index) => {
+			const box = document.createElement("div");
+			box.className = "dsh-pet-chat-thumb is-video";
+			box.textContent = "MP4";
+			box.title = item.name;
+			const rm = document.createElement("button");
+			rm.type = "button";
+			rm.textContent = "×";
+			rm.title = "移除";
+			rm.addEventListener("click", (event) => {
+				event.preventDefault();
+				event.stopPropagation();
+				pendingVideos.splice(index, 1);
+				renderImages();
+			});
+			box.appendChild(rm);
+			preview.appendChild(box);
+		});
 	};
 	const addFiles = (list) => {
-		const files = Array.from(list || []).filter((file) => file && String(file.type || "").startsWith("image/")).slice(0, Math.max(0, 4 - pendingImages.length));
-		if (files.length === 0) return;
-		Promise.all(files.map(readImageFile)).then((items) => {
-			pendingImages.push(...items);
-			renderImages();
-		}).catch((error) => {
-			err.textContent = "图片读取失败：" + (error?.message ?? error);
+		const all = Array.from(list || []).filter(Boolean);
+		const imageFiles = all.filter((file) => String(file.type || "").startsWith("image/")).slice(0, Math.max(0, 4 - pendingImages.length));
+		const videoFiles = all.filter((file) => String(file.type || "").startsWith("video/") || /\.(mp4|mov|mkv|webm)$/i.test(String(file.name || ""))).slice(0, Math.max(0, 1 - pendingVideos.length));
+		if (imageFiles.length === 0 && videoFiles.length === 0) return;
+		const jobs = [];
+		if (imageFiles.length > 0) jobs.push(Promise.all(imageFiles.map(readImageFile)).then((items) => pendingImages.push(...items)));
+		if (videoFiles.length > 0) jobs.push(Promise.all(videoFiles.map(readVideoFile)).then((items) => pendingVideos.push(...items)));
+		Promise.all(jobs).then(renderImages).catch((error) => {
+			err.textContent = "附件读取失败：" + (error?.message ?? error);
 			err.style.display = "block";
 		});
 	};
@@ -1600,11 +1631,12 @@ function mountChatDialog(opts) {
 	const doSend = () => {
 		if (closed || sending) return;
 		const text = input.value.trim();
-		if ((!text && pendingImages.length === 0) || sending) return;
+		if ((!text && pendingImages.length === 0 && pendingVideos.length === 0) || sending) return;
 		sending = true;
 		input.disabled = true;
 		const images = pendingImages.map(({ name, mime, data }) => ({ name, mime, data }));
-		sendChat(withPet, text, images).then((state) => {
+		const videos = pendingVideos.map(({ name, path }) => ({ name, path }));
+		sendChat(withPet, text, images, videos).then((state) => {
 			if (state.ok) {
 				close();
 				if (onSent) onSent();

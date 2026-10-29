@@ -5390,13 +5390,17 @@ ctx.effect(() => {
 				console.warn("[dsh-pet] 本地图片附件创建失败：" + (error?.message ?? error));
 			}
 		}
-		const userText = String(text ?? "").trim() || (pictureMetas.length > 0 ? "[图片]" : "");
+		const userText = String(text ?? "").trim() || (pictureMetas.length > 0 ? "[图片]" : (Array.isArray(options.videos) && options.videos.length > 0 ? "[视频]" : ""));
 		if (!userText && imageAttachments.length === 0) return {
 			ok: false,
 			reason: "bad-request",
 			message: "消息为空"
 		};
 		const system = await buildScopeSystem({ scope: "local", found, petId, privateRead: true });
+		const localVideos = Array.isArray(options.videos) ? options.videos.filter((video) => video && typeof video.path === "string" && video.path.trim()).slice(0, 1) : [];
+		if (localVideos.length > 0) {
+			system += "\n\n" + localVideos.map((video) => "[用户发送了一段视频，你可以使用 [[video_storyboard: " + String(video.id ?? "v1") + "]] 来查看分镜]").join("\n");
+		}
 		const pool = found.conf.chatImageEnabled === true ? limitPool(readMemePool(found.conf.memes, memeDirsFor(found.entry)), Number(found.conf.chatImageLimit)) : [];
 		const mem = await readMemory();
 		const bucket = mem[found.entry] ?? (mem[found.entry] = {});
@@ -5422,12 +5426,12 @@ ctx.effect(() => {
 				console.warn("[dsh-pet] 截屏失败：" + (error?.message ?? error));
 			}
 			if (screenImage) {
-				generated = await generateChatWithMemory({ system: chatContext.system + "\n\n【主人当前屏幕的截图已附在用户消息里，请直接看图回答；不要提截图、附件、OCR 或 AI。】", history: chatContext.history, text: userText, pool, images: [...imageAttachments, screenImage], found, memoryScopes: chatContext.scopes ?? ["owner"] });
+				generated = await generateChatWithMemory({ system: chatContext.system + "\n\n【主人当前屏幕的截图已附在用户消息里，请直接看图回答；不要提截图、附件、OCR 或 AI。】", history: chatContext.history, text: userText, pool, images: [...imageAttachments, screenImage], found, memoryScopes: chatContext.scopes ?? ["owner"], videos: localVideos });
 			} else {
-				generated = await generateChatWithMemory({ system: chatContext.system + "\n\n【本来想看一眼屏幕，但截屏失败了；请自然回答，不要提截图或失败。】", history: chatContext.history, text: userText, pool, images: imageAttachments, found, memoryScopes: chatContext.scopes ?? ["owner"] });
+				generated = await generateChatWithMemory({ system: chatContext.system + "\n\n【本来想看一眼屏幕，但截屏失败了；请自然回答，不要提截图或失败。】", history: chatContext.history, text: userText, pool, images: imageAttachments, found, memoryScopes: chatContext.scopes ?? ["owner"], videos: localVideos });
 			}
 		} else {
-			generated = await generateChatWithMemory({ system: chatContext.system, history: chatContext.history, text: userText, pool, images: imageAttachments, found, memoryScopes: chatContext.scopes ?? ["owner"] });
+			generated = await generateChatWithMemory({ system: chatContext.system, history: chatContext.history, text: userText, pool, images: imageAttachments, found, memoryScopes: chatContext.scopes ?? ["owner"], videos: localVideos });
 		}
 		if (!generated.ok) return generated;
 		const now = Date.now();
@@ -6880,7 +6884,10 @@ if (rest === "diary") {
 					const parsed = JSON.parse(body ?? "null") ?? {};
 					const text = typeof parsed.text === "string" ? parsed.text.trim() : "";
 					const images = Array.isArray(parsed.images) ? parsed.images : [];
-					if (!text && images.length === 0) return {
+					const videos = Array.isArray(parsed.videos)
+						? parsed.videos.filter((video) => video && typeof video.path === "string" && video.path.trim()).slice(0, 1)
+						: [];
+					if (!text && images.length === 0 && videos.length === 0) return {
 						kind: "json",
 						status: 200,
 						obj: {
@@ -6903,7 +6910,7 @@ if (rest === "diary") {
 							message: "消息过长（限 2000 字）"
 						}
 					};
-					const result = await chatWithPet(petId$1, text, { images });
+					const result = await chatWithPet(petId$1, text, { images, videos });
 					return {
 						kind: "json",
 						status: 200,
