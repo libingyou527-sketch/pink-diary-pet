@@ -64,11 +64,14 @@ window.__ModuleLoader__.load({
       return response.json()
     }
 
-    async function sendToPet(text, images = []) {
+    async function sendToPet(text, images = [], videos = []) {
+      const body = { text }
+      if (Array.isArray(images) && images.length > 0) body.images = images
+      if (Array.isArray(videos) && videos.length > 0) body.videos = videos
       const response = await fetch(PET_CHAT_ROUTE, {
         method: 'POST',
         headers: { 'content-type': 'application/json', accept: 'application/json' },
-        body: JSON.stringify(Array.isArray(images) && images.length > 0 ? { text, images } : { text }),
+        body: JSON.stringify(body),
       })
       const result = await response.json().catch(() => null)
       if (!response.ok || result === null || result.ok !== true) {
@@ -99,6 +102,24 @@ window.__ModuleLoader__.load({
         }
         reader.onerror = () => reject(new Error('读取图片失败'))
         reader.readAsDataURL(file)
+      })
+    }
+
+    function readVideoFile(file) {
+      return new Promise((resolve, reject) => {
+        let path = String(file?.path ?? '')
+        if (!path && typeof window.__DSH_HOST_PATHS__?.pathFor === 'function') {
+          try { path = String(window.__DSH_HOST_PATHS__.pathFor(file) || '') } catch {}
+        }
+        if (!path) {
+          reject(new Error('本地视频拖拽仅桌面版支持'))
+          return
+        }
+        if (!/\.(mp4|mov|mkv|webm)$/i.test(String(file.name ?? ''))) {
+          reject(new Error('仅支持本地视频文件'))
+          return
+        }
+        resolve({ name: file.name || 'video.mp4', path })
       })
     }
 
@@ -366,6 +387,7 @@ window.__ModuleLoader__.load({
       const [sending, setSending] = React.useState(false)
       const [pending, setPending] = React.useState(null)
       const [pendingImages, setPendingImages] = React.useState([])
+      const [pendingVideos, setPendingVideos] = React.useState([])
       const [visibleCount, setVisibleCount] = React.useState(10)
       const [sendError, setSendError] = React.useState(null)
       const alive = React.useRef(true)
@@ -455,13 +477,21 @@ window.__ModuleLoader__.load({
       }
 
       const addFiles = (list) => {
-        const files = Array.from(list || [])
-          .filter((file) => file && (!file.type || String(file.type).startsWith('image/')))
+        const all = Array.from(list || []).filter(Boolean)
+        const imageFiles = all
+          .filter((file) => !file.type || String(file.type).startsWith('image/'))
           .slice(0, Math.max(0, 4 - pendingImages.length))
-        if (files.length === 0) return
-        Promise.all(files.map(readImageFile))
-          .then((items) => setPendingImages((previous) => [...previous, ...items]))
-          .catch((error) => setSendError(String(error?.message ?? error)))
+        const videoFiles = all
+          .filter((file) => String(file.type || '').startsWith('video/') || /\.(mp4|mov|mkv|webm)$/i.test(String(file.name || '')))
+          .slice(0, Math.max(0, 1 - pendingVideos.length))
+        const jobs = []
+        if (imageFiles.length > 0) {
+          jobs.push(Promise.all(imageFiles.map(readImageFile)).then((items) => setPendingImages((previous) => [...previous, ...items])))
+        }
+        if (videoFiles.length > 0) {
+          jobs.push(Promise.all(videoFiles.map(readVideoFile)).then((items) => setPendingVideos((previous) => [...previous, ...items])))
+        }
+        Promise.all(jobs).catch((error) => setSendError(String(error?.message ?? error)))
       }
 
       const onPasteImage = (event) => {
@@ -485,20 +515,26 @@ window.__ModuleLoader__.load({
       const send = React.useCallback(async () => {
         const text = draft.trim()
         const images = pendingImages
-        if ((text === '' && images.length === 0) || sending) return
+        const videos = pendingVideos
+        if ((text === '' && images.length === 0 && videos.length === 0) || sending) return
         if (text.length > MAX_TEXT) {
           setSendError(t('tooLong'))
           return
         }
         setSending(true)
         setSendError(null)
-        setPending({ role: 'user', content: text || '[图片]', ts: Date.now() })
+        setPending({ role: 'user', content: text || (videos.length > 0 ? '[视频]' : '[图片]'), ts: Date.now() })
         setDraft('')
         try {
-          await sendToPet(text, images.map(({ name, mime, data }) => ({ name, mime, data })))
+          await sendToPet(
+            text,
+            images.map(({ name, mime, data }) => ({ name, mime, data })),
+            videos.map(({ name, path }) => ({ name, path })),
+          )
           await load(true)
           setPending(null)
           setPendingImages([])
+          setPendingVideos([])
           if (inputRef.current) inputRef.current.focus()
         } catch (error) {
           setPending(null)
@@ -507,7 +543,7 @@ window.__ModuleLoader__.load({
         } finally {
           setSending(false)
         }
-      }, [draft, pendingImages, sending, load, t])
+      }, [draft, pendingImages, pendingVideos, sending, load, t])
 
       const onKeyDown = (event) => {
         if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent?.isComposing) {
@@ -585,7 +621,7 @@ window.__ModuleLoader__.load({
         )
       }
 
-      const canSend = (draft.trim() !== '' || pendingImages.length > 0) && !sending
+      const canSend = (draft.trim() !== '' || pendingImages.length > 0 || pendingVideos.length > 0) && !sending
 
       const composer = h(
         'div',
@@ -625,6 +661,30 @@ window.__ModuleLoader__.load({
                   ),
                 )
               : null,
+            pendingVideos.length > 0
+              ? h(
+                  'div',
+                  { style: S.imageStrip },
+                  pendingVideos.map((video, index) =>
+                    h(
+                      'div',
+                      { key: index + ':' + video.name, style: S.imageThumb, title: video.name },
+                      h('div', { style: { fontSize: 11, color: '#3451b2', textAlign: 'center', lineHeight: '48px' } }, 'MP4'),
+                      h(
+                        'button',
+                        {
+                          type: 'button',
+                          style: S.imageRemove,
+                          onClick: () => setPendingVideos((previous) => previous.filter((_, i) => i !== index)),
+                          title: '移除',
+                        },
+                        '×',
+                      ),
+                    ),
+                  ),
+                )
+              : null,
+            pendingVideos.length > 0 ? h('div', { style: { color: '#3451b2', fontSize: 12, padding: '6px 0' } }, '[本地视频处理中...]') : null,
             sendError ? h('div', { style: S.sendError }, sendError) : null,
             h('textarea', {
               ref: inputRef,
