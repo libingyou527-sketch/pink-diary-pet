@@ -1,4 +1,4 @@
-﻿# Dependencies
+# Dependencies
 node_modules/
 
 # Local/private data
@@ -25,7 +25,8 @@ memory.json
 user-memory.json
 user-group-memory.json
 user-profiles.json
-pet-qq-memory.json\ncontext-blocks.json
+pet-qq-memory.json
+context-blocks.json
 pet-inbound.log
 *.log
 
@@ -36,7 +37,11 @@ pictures/
 *.sqlite
 *.db
 
-# Local media tools\ntools/ffmpeg/\ntools/\n\n# Model / media assets (bring your own; see assets/README.md)
+# Local media tools
+tools/ffmpeg/
+tools/
+
+# Model / media assets (bring your own; see assets/README.md)
 assets/model/
 assets/**/*.webm
 assets/**/*.moc3
