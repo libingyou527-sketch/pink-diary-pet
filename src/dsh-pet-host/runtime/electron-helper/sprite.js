@@ -13,6 +13,12 @@ const OPEN_SHORTCUT_HINT = /Mac/i.test(navigator.platform || navigator.userAgent
 /** 本次点击是否按住了「呼出 DSH」的修饰键（Ctrl / Cmd） */
 const isOpenShortcut = (e) => !!(e && (e.ctrlKey || e.metaKey));
 
+/** 常驻待机动画：所有一次性点播（动作 / 表情）播完都回落到这一段，并循环播放 */
+const IDLE_LOOP_ANIM = 'idle_8s';
+const ONESHOT_IDLE_ANIM = 'idle_8s';
+/** 镜像朝向的持久化键（localStorage）：重启后保持上次的方向 */
+const FACING_STORAGE_KEY = 'dsh-pet:facing';
+
 // ---------- 单只宠物（行为与浏览器 PetCard 一致；纯逻辑来自 src/shared） ----------
 class PetSprite {
   constructor(pet) {
@@ -83,6 +89,9 @@ class PetSprite {
     // 为什么要单独一个字段：this.anim 只是动画名，右键菜单点播与第三方 /anim 可以播同名动画，
     // 光看名字分不出"这一段该不该上报回执"。
     this.playback = null;
+    // 一次性点播（playOneShot / 表情 / 动作）播完后要回到的常驻待机动画名。
+    // null = 当前不是"一次性点播"状态，走原有随机链。见 playOneShot / handleEnded。
+    this.oneShotReturn = null;
     // 朝向走 accessor（见下方 get/set facing）：赋值即标记实况脏，交给节流上报。
     // 构造函数里**直接写 `_facing`**，避免在其它字段就绪前就触发一次上报。
     this._facing = 'left';
@@ -218,6 +227,9 @@ class PetSprite {
     this.el.appendChild(this.tip);
     this.el.appendChild(stage);
     rootEl.appendChild(this.el);
+    // 朝向持久化：上次退出时是朝右就恢复朝右（只影响视频层，气泡/HUD 位置不动）
+    this.restoreFacing();
+    this.applyFacingTransform();
     this.position();
 
     // 事件（与浏览器同一套：pointerdown/move、click、window pointerup/cancel）
@@ -342,6 +354,47 @@ class PetSprite {
     if (this._facing === value) return;
     this._facing = value;
     this.markPoseDirty();
+  }
+
+  /** 把朝向落到两个 <video> 上（只翻视频层；气泡/提示/命中区都在 stage 之外或不受 transform 影响） */
+  applyFacingTransform() {
+    const t = this._facing === 'right' ? 'scaleX(-1)' : '';
+    for (const el of [this.videoA, this.videoB]) if (el) el.style.transform = t;
+  }
+
+  /**
+   * 手动镜像翻转（右键菜单「镜像翻转」/ 后续快捷栏）。
+   * 直接改 `_facing` 而不是走 setter：setter 在值相同时短路，翻转要"立即重绘"。
+   * @param force true=强制朝右 / false=强制朝左 / 省略=切换
+   * @returns {'left'|'right'} 翻转后的朝向
+   */
+  flipMirror(force) {
+    const next = typeof force === 'boolean' ? (force ? 'right' : 'left') : this._facing === 'right' ? 'left' : 'right';
+    this._facing = next;
+    this.markPoseDirty();
+    this.applyFacingTransform();
+    this.persistFacing();
+    console.log('[dsh-pet] 镜像翻转 pet=' + this.pet.id + ' facing=' + next);
+    return next;
+  }
+
+  /** 朝向写进 localStorage（跨重启保持；隐私模式/无 storage 时静默忽略） */
+  persistFacing() {
+    try {
+      window.localStorage.setItem(FACING_STORAGE_KEY, this._facing);
+    } catch (e) {
+      /* 没有 localStorage：不持久化，不影响翻转本身 */
+    }
+  }
+
+  /** 从 localStorage 恢复朝向（构造时调用，首帧就按上次的方向渲染） */
+  restoreFacing() {
+    try {
+      const v = window.localStorage.getItem(FACING_STORAGE_KEY);
+      if (v === 'left' || v === 'right') this._facing = v;
+    } catch (e) {
+      /* 忽略 */
+    }
   }
 
   /** 实况变了 → 交给节流器（连续变化被合并成一次冲刷） */
@@ -586,9 +639,57 @@ class PetSprite {
   }
 
   playOnce(name, playbackId, url) {
+    this.oneShotReturn = null; // 任何常规点播都接管回落权，清掉上一次的一次性点播标记
     this.anim = name;
     this.once = true;
     this.switchTo(name, true, playbackId, url);
+  }
+
+  /**
+   * 通用一次性播放：播任意一段 .webm（动作 / 表情），`onended` 时自动切回 idle_8s。
+   *
+   * 这是给 UI / 聊天事件用的统一入口——调用方只关心"播哪个素材"，不用管双缓冲、
+   * 播放回执、加载兜底、播完回待机这些细节（全部复用 switchTo / handleEnded）。
+   *
+   * @param {string} videoName 素材名，带不带 `.webm` 都行（`wink_3s` / `expr_墨镜.webm`）。
+   * @returns {boolean} 是否受理（名字为空 / 已销毁时返回 false）。
+   */
+  playOneShot(videoName) {
+    const name = String(videoName || '').replace(/\.webm$/i, '').trim();
+    if (!name) return false;
+    this.stopMove();
+    this.playOnce(name); // playOnce 会先把 oneShotReturn 清空
+    this.oneShotReturn = ONESHOT_IDLE_ANIM; // 播完回落 idle_8s（见 handleEnded）
+    return true;
+  }
+
+  /** 循环播放一段常驻动画（默认就是待机），不触发 ended 回落 */
+  playLoop(videoName) {
+    const name = String(videoName || '').replace(/\.webm$/i, '').trim();
+    if (!name) return false;
+    this.stopMove();
+    this.oneShotReturn = null;
+    this.anim = name;
+    this.once = false;
+    this.switchTo(name, false);
+    return true;
+  }
+
+  /** 待机循环（供 UI 主动回到空闲状态） */
+  playIdleLoop() {
+    return this.playLoop(IDLE_LOOP_ANIM);
+  }
+
+  /** 播一个动作片段（wink_3s / cute_4s / smile_3s / swing_10s），语义同 playOneShot */
+  playAction(name) {
+    return this.playOneShot(name);
+  }
+
+  /** 播一个表情片段：名字给中文表情名（墨镜 / 星星眼 …），自动补 expr_ 前缀 */
+  playExpression(name) {
+    const raw = String(name || '').replace(/\.webm$/i, '').trim();
+    if (!raw) return false;
+    return this.playOneShot(raw.startsWith('expr_') ? raw : 'expr_' + raw);
   }
 
   // 直接播一个**外部地址**（POST /anim 的 url 参数，issue #122 第 1 条）。
@@ -697,6 +798,9 @@ class PetSprite {
       const act = S.pickCategoryAction(animations.categories, animations.idle, this.facing, this.anim);
       next = act.name;
     }
+    // 空池兜底：turn / categories 被清空时 S.pick 会返回 undefined，直接 playOnce(undefined)
+    // 会让动画链卡在上一帧（不再触发 ended）。这里统一回落到 idle 池，保证链一定推进。
+    if (!next) next = S.pick(animations.idle, this.anim) || animations.idle[0];
     this.playOnce(next);
   }
 
@@ -716,6 +820,14 @@ class PetSprite {
     // 带 anim 的气泡（默认就是 true），说话动画播完就把工作状态动画点回来，冻结形同虚设。
     // 播放回执已经在上面上报，不受这一行影响。
     if (this.frozen) return;
+    // 一次性点播（动作 / 表情 / playOneShot）播完：先回到 idle_8s 常驻待机，不掷随机链。
+    // 判在随机链之前，保证"点一下表情 → 播完稳稳回待机"，不会被随机动作打断观感。
+    if (this.oneShotReturn) {
+      const back = this.oneShotReturn;
+      this.oneShotReturn = null;
+      this.playLoop(back);
+      return;
+    }
     const { animations } = { animations: this.animations };
     // 事件动画播完：回 idle（与 drag/clicks 同分支，不进随机链）；气泡由定时器自动消失，与动画解耦
     const isEvent = S.isEventAnim(animations.events, this.anim);
@@ -746,10 +858,12 @@ class PetSprite {
       if (animations.idle.length) this.playOnce(S.pick(animations.idle, this.anim));
       return;
     }
-    if (animations.turn.includes(this.anim)) {
-      const next = this.facing === 'left' ? 'right' : 'left';
-      this.facing = next; // 立即同步：翻转后的 pickNext 用新朝向过滤 noMirror
-    }
+    // 转身素材（turn_left / turn_right）本身就是"看左 / 看右"的画面：
+    // 播完**不再改 facing**，否则会"视频里转了身，紧接着又被 CSS 镜像一次"。
+    // 旧实现（镜像式转向）保留在这里备查：
+    //   if (animations.turn.includes(this.anim)) {
+    //     this.facing = this.facing === 'left' ? 'right' : 'left';
+    //   }
     if (animations.drag.includes(this.anim) || animations.clicks.includes(this.anim)) {
       // 互动动画播完：workStatus 非终态时恢复状态循环，否则回 idle（与浏览器同一语义）
       if (this.resumeWorkStatusAnim()) return;
@@ -1639,6 +1753,7 @@ class PetSprite {
     tools.push(
       { label: '碎碎念', action: 'whisper' },
       { label: '对话', action: 'chat' },
+      { label: '镜像翻转', action: 'mirror' },
       { label: '回到初始位置', action: 'home' },
       // 显示位置（仅网页/仅桌面/两者/都不）：改这只宠物的 display 配置 + 宿主重载生效。
       // 与浏览器端注入的是**同一份**子菜单（shared 的 displayMenuBranch），两端文案/取值不会漂移。
@@ -1711,6 +1826,10 @@ class PetSprite {
     }
     if (leaf.action === 'home') {
       this.goHome(); // 停漫游/移动，清会话位置，回配置角落
+      return;
+    }
+    if (leaf.action === 'mirror') {
+      this.flipMirror(); // 手动镜像翻转（只翻视频层，HUD 不动；状态持久化到 localStorage）
       return;
     }
     if (leaf.action === 'set-display') {

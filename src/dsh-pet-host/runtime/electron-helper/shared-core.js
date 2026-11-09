@@ -927,8 +927,11 @@ function buildMenuTree(animations) {
 		label: c.id,
 		children: c.actions.map(leaf)
 	});
+	// 事件池（余额/碎碎念/工作状态）是**自动播放**的，不是可点的动作；菜单里默认不列，
+	// 免得和「Cyrene 动作 / Cyrene 表情」混在一起。临时排查时把下面开关改 true 即可。
+	const SHOW_EVENT_ANIMS_IN_MENU = false;
 	const events = animations.events ?? {};
-	for (const key of Object.keys(events)) {
+	if (SHOW_EVENT_ANIMS_IN_MENU) for (const key of Object.keys(events)) {
 		const pool = events[key] ?? [];
 		const names = [];
 		for (const slot of pool) if (typeof slot === "string") names.push(slot);

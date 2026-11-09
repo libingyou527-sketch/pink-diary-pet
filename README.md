@@ -11,6 +11,10 @@
 - **Live2D / WebM 桌宠渲染**
   - dsh-pet 桌面窗口与 Web 聊天弹窗；
   - 支持透明桌宠、拖拽、点击、气泡对话；
+  - 19 段预渲染 WebM 素材：5 个动作 / 2 个转身 / 12 个表情（1000×1000、30fps、VP9 带 alpha）；
+  - 右键「镜像翻转」即时换向，方向存 `localStorage`，重启保持；
+  - `POST /dsh-pet-7340/anim` 可在聊天/插件里点播任意片段（如 AI 判断开心 → `expr_星星眼`）；
+  - 素材规格、配置池与接口详见 [docs/dsh-pet-animations.md](docs/dsh-pet-animations.md)；
   - 自带模型占位说明，使用者可替换为自己的 Live2D/WebM 素材。
 
 - **QQ 官方 Bot 接入**

@@ -113,6 +113,30 @@ async function boot() {
     window.__dshPetDebug.configOk = true;
     window.__dshPetDebug.spriteCount = sprites.length;
     for (const s of sprites) s.playIdle();
+
+    // ---- 动画触发接口（留给后续 UI / 聊天事件扩展）----
+    // 一次性点播播完由 PetSprite.handleEnded 自动回到 idle_8s，调用方不用管收尾。
+    //   window.dshPetAnim.playExpression('墨镜')   → expr_墨镜.webm
+    //   window.dshPetAnim.playAction('wink_3s')    → wink_3s.webm
+    //   window.dshPetAnim.playOneShot('任意素材名') → 任意 *_*.webm
+    //   window.dshPetAnim.playIdle()               → 回到 idle_8s 循环
+    //   window.dshPetAnim.current()                → 当前素材名
+    // 也支持事件方式（便于样式层 / 插件解耦）：dispatchEvent(new CustomEvent('dsh-pet:anim', { detail: { kind: 'expression', name: '星星眼' } }))
+    window.dshPetAnim = {
+      playOneShot: (name) => (sprites[0] ? sprites[0].playOneShot(name) : false),
+      playAction: (name) => (sprites[0] ? sprites[0].playAction(name) : false),
+      playExpression: (name) => (sprites[0] ? sprites[0].playExpression(name) : false),
+      playIdle: () => (sprites[0] ? sprites[0].playIdleLoop() : false),
+      current: () => (sprites[0] ? sprites[0].anim : null),
+    };
+    window.addEventListener('dsh-pet:anim', (e) => {
+      const sprite = sprites[0];
+      const detail = (e && e.detail) || {};
+      if (!sprite || !detail.name) return;
+      if (detail.kind === 'expression') sprite.playExpression(detail.name);
+      else if (detail.kind === 'action') sprite.playAction(detail.name);
+      else sprite.playOneShot(detail.name);
+    });
     startLoops();
     requestAnimationFrame(() => {
       console.log('[dsh-pet-startup] first-frame +' + Math.round(performance.now() - STARTUP_T0) + 'ms');
