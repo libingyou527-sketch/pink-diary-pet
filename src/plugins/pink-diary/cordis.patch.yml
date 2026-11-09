@@ -1,0 +1,6 @@
+# xu-pink-diary bundle patch: mounts the Host half that reads and writes
+# ~/.dsh/pink-diary for the sidebar panel and dsh-pet.
+- insert:
+    - id: xu-pink-diary
+      name: xu-pink-diary
+      required: false

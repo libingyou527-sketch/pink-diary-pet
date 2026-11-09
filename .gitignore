@@ -18,6 +18,8 @@ config/config.yml
 config/config.local.*
 **/cordis.patch.yml.bak*
 **/cordis.patch.yml.bak-*
+*.bak
+*.bak-*
 
 # Pet memory / identity / logs
 identity.json
@@ -30,16 +32,12 @@ context-blocks.json
 pet-inbound.log
 *.log
 
-# Runtime data
-diary/
-pink-diary/
-pictures/
+# Runtime data（只忽略仓库根下的数据目录，别误伤 src/plugins/pink-diary 这类源码）
+/diary/
+/pink-diary/
+/pictures/
 *.sqlite
 *.db
-
-# Local media tools
-tools/ffmpeg/
-tools/
 
 # Model / media assets (bring your own; see assets/README.md)
 assets/model/
@@ -50,14 +48,11 @@ assets/**/*.bin3
 assets/**/*.png
 *.wpk
 
+# Local media tools (ffmpeg 二进制等，不上传)
+tools/
+
 # OS/editor
 .DS_Store
 Thumbs.db
 .vscode/
 .idea/
-
-
-
-# Local media binaries
-tools/
-
