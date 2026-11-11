@@ -170,12 +170,13 @@ export class PetBridge {
       return
     }
     const text = String(packet.text ?? '').trim()
-    if (!text) {
+    const emojiPath = String(packet.emojiPath ?? '').trim()
+    if (!text && !emojiPath) {
       this.send(ws, { action: 'error', message_id: messageId, error: 'empty text' })
       return
     }
     try {
-      await this.sendReply(pending.target, text)
+      await this.sendReply(pending.target, text, emojiPath)
       await this.onSent?.(pending.context, text)
       this.pending.delete(messageId)
       this.send(ws, { action: 'ack', message_id: messageId, ok: true })

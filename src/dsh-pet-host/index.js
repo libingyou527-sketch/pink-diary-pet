@@ -1,4 +1,4 @@
-import { createReadStream, existsSync, fstatSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
+import { createReadStream, existsSync, fstatSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { appendFileSync } from "node:fs";
 import { mkdir, readdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -566,7 +566,7 @@ async function generateWith$1(ctx, llm, sel, system, meme) {
 	const options = {
 		provider: sel.provider,
 		model: sel.model,
-		sessionId: PET_CALL_IDENTITY,
+		sessionId: "dsh-pet-whisper",
 		messages: [createUserMessage({
 			content: [{
 				type: "text",
@@ -676,7 +676,7 @@ const TIMEOUT_MS = 6e4;
 function imageInstruction(pool) {
 	return "\n\n[配图] 回复结尾可选附一张表情包给用户看，从下列清单里挑最贴合当前语境的：\n" + memeCatalog(pool) + "\n挑中就在回复最后另起一行写 [图:名称]（名称原样照抄）；没有合适的就完全不要写这个标记。";
 }
-async function generateChat(ctx, system, history, userText, pool = [], preferred, images = []) {
+async function generateChat(ctx, system, history, userText, pool = [], preferred, images = [], sessionId = "dsh-pet-chat") {
 	const imageList = Array.isArray(images) ? images.filter(Boolean) : images ? [images] : [];
 	const candidates = modelCandidates(ctx, preferred);
 	if (candidates.length === 0) return {
@@ -696,7 +696,7 @@ async function generateChat(ctx, system, history, userText, pool = [], preferred
 		message: noTextReason(void 0)
 	};
 	for (const [i, sel] of candidates.entries()) {
-		const result = await generateWith(ctx, llm, sel, system, history, userText, pool, imageList);
+		const result = await generateWith(ctx, llm, sel, system, history, userText, pool, imageList, sessionId);
 		if (result.ok) return result;
 		last = result;
 		if (i + 1 < candidates.length) console.warn(`dsh-pet: 对话用 ${modelLabel(sel)} 生成失败（${result.message ?? result.reason}），回落到 ${modelLabel(candidates[i + 1])}`);
@@ -704,7 +704,7 @@ async function generateChat(ctx, system, history, userText, pool = [], preferred
 	return last;
 }
 /** 用**一个**确定的 provider/model 跑一次对话生成（候选链的一环；失败原样返回结构化原因，不吞） */
-async function generateWith(ctx, llm, sel, system, history, userText, pool, images = []) {
+async function generateWith(ctx, llm, sel, system, history, userText, pool, images = [], sessionId = "dsh-pet-chat") {
 	const imageList = Array.isArray(images) ? images.filter(Boolean) : images ? [images] : [];
 	const historyMessages = history.map((m) => m.role === "user" ? createUserMessage({
 		content: [{
@@ -728,7 +728,7 @@ async function generateWith(ctx, llm, sel, system, history, userText, pool, imag
 	const options = {
 		provider: sel.provider,
 		model: sel.model,
-		sessionId: PET_CALL_IDENTITY,
+		sessionId,
 		messages: [...historyMessages, createUserMessage({
 			content: [
 				{
@@ -3294,6 +3294,33 @@ function timeContextOf(date) {
 	return "【当下】现在是" + date.getFullYear() + "年" + (date.getMonth() + 1) + "月" + date.getDate() + "日" + (WEEKDAYS[day] ?? "星期?") + " " + pad2(hour) + ":" + pad2(date.getMinutes()) + "，" + timeSlotOf(hour) + "，" + dayKindOf(day) + (holiday ? "，" + holiday : "") + "。这只是背景，不必刻意报时，也别句句都提节日——多数时候正常说话就好，真贴切时才顺口带一句。";
 }
 
+// 历史消息的绝对时间前缀与聊天尾部的当前时间/风格指令。
+const messageTimeStamp = (ts) => {
+	const d = new Date(Number(ts));
+	if (Number.isNaN(d.getTime())) return "";
+	return pad2(d.getMonth() + 1) + "-" + pad2(d.getDate()) + " " +
+		pad2(d.getHours()) + ":" + pad2(d.getMinutes()) + ":" + pad2(d.getSeconds());
+};
+const withMessageTime = (text, ts = Date.now()) => {
+	const content = String(text ?? "");
+	if (!content.trim()) return content;
+	if (/^\[\d{2}-\d{2} \d{2}:\d{2}:\d{2}\]\s*/.test(content)) return content;
+	const stamp = messageTimeStamp(ts);
+	return stamp ? "[" + stamp + "] " + content : content;
+};
+const chatTail = (now = new Date()) => {
+	const stamp = now.getFullYear() + "-" + pad2(now.getMonth() + 1) + "-" + pad2(now.getDate()) +
+		" " + pad2(now.getHours()) + ":" + pad2(now.getMinutes()) + ":" + pad2(now.getSeconds());
+	return "\n\n【最高强指令】绝对禁止使用任何括号（）或()进行动作/心理描写！必须用标点（~！）或 [表情:文件名] 来表达情绪！\n" +
+		"❌ 错误：好呀，（歪了歪头）人家记下啦。\n" +
+		"✅ 正确：好呀~ 人家记下啦！[表情:得意坏笑]\n" +
+		"[当前时间：" + stamp + "]\n" +
+		"【时间使用原则】你的历史记录带有时间戳，当前时间也已知。但这仅仅是你的潜意识背景常识。除非用户主动问起时间、或者用户的话明确涉及了过去（如‘昨天’、‘早上’），否则绝对不要主动报时、不要感叹时间流逝、不要每句话都强行提时间。\n" +
+		"除非用户主动问起时间或明确提到过去，否则回复中不要出现‘上午/下午/晚上/几点/时间’等时间词，也不要感叹时间。\n" +
+		"如果距离上一句间隔极短（如几分钟内），就当做连续聊天自然接话；如果间隔极长且用户开启了全新话题，就当做什么都没发生一样直接顺应新话题。";
+};
+
+
 //#endregion
 //#region src/host/persona.ts
 function petPersona(conf, pet) {
@@ -4087,6 +4114,13 @@ const MEDIA_CACHE_DIR = join(userRoot, "media-cache");
 const PICTURE_MAX_BYTES = 12 * 1024 * 1024;
 const MEDIA_ID_RE = /^[0-9A-Za-z._-]+\.(?:webp|jpe?g|png)$/i;
 
+// [emoji library] 压缩图 + 增量元数据；只在本地读取，不进 system prompt。
+const EMOJI_ASSETS_ROOT = process.env.PINK_EMOJI_DIR || join(PACKAGE_ROOT_ASSETS, "emojis");
+const EMOJI_COMPRESSED_ROOT = process.env.PINK_EMOJI_COMPRESSED_DIR || join(PACKAGE_ROOT_ASSETS, "emojis_compressed");
+const EMOJI_META_PATH = process.env.PINK_EMOJI_META || join(PACKAGE_ROOT_ASSETS, "emojis_meta.json");
+const EMOJI_TAG_RE = /\[表情[:：]\s*([^\]\r\n]*?)\s*\]/g;
+let emojiMetaCache = { at: 0, mtime: 0, value: null };
+
 const pictureDescription = (text) => String(text ?? "").trim() || "[图片]";
 
 const savePictureBuffer = async (buffer, description, source) => {
@@ -4196,6 +4230,23 @@ const appendDiaryLine = (line, at = new Date()) => queueDiaryWrite(async () => {
     return { file, line: stamp };
 });
 
+/**
+ * 只建立当天日记文件，不调用模型、不写正文。
+ * 启动和 00:01 使用；真正的内容由 23:59 总结或珍贵片段写入。
+ */
+const createDiarySkeleton = (at = new Date()) => queueDiaryWrite(async () => {
+    await mkdir(DIARY_DIR, { recursive: true });
+    const file = diaryFileForDay(at);
+    if (await diaryFileExists(at)) return { file, created: false };
+    const next = "---\ndate: " + diaryIso(at) + "\nauthor: 絮\n---\n\n";
+    const temp = file + ".tmp";
+    await writeFile(temp, next, "utf8");
+    await rename(temp, file);
+    diaryCache = { at: 0, text: "" };
+    return { file, created: true };
+});
+
+
 const diaryLog = (message) => {
     console.log(message);
     try {
@@ -4233,6 +4284,8 @@ const readDiaryFiles = async () => {
         try {
             const raw = await readFile(join(DIARY_DIR, id), "utf8");
             const parsed = splitDiary(raw);
+            // 00:01/启动只建空白日记；空正文不占最近日记上下文的名额。
+            if (!parsed.body) continue;
             const when = new Date(parsed.meta.date ?? "");
             entries.push({
                 id,
@@ -4278,6 +4331,130 @@ const diarySystemSuffix = async () => {
     if (!text) return "";
     return "\n\n【絮的粉色日记】\n下面是你最近写下的粉色日记（只读）。你可以在对话里自然想起或提起，但不要逐字复述；如果对方问起日记，就以这些内容为准。\n\n" + text;
 };
+/**
+ * 动态日记只允许进入当前用户消息尾部，绝不进入 system。
+ * 这样 system 的人设/工具/ACL 前缀保持稳定，缓存前缀不被日期或日记内容打断。
+ */
+const appendDiaryToUserText = async (text, scope) => {
+    if (scope !== "local" && scope !== "owner-private") return String(text ?? "");
+    const diary = await diarySystemSuffix();
+    return diary ? String(text ?? "") + diary : String(text ?? "");
+};
+
+// ---- [emoji library] 标签检索、user-tail 指令、回复解析 ----
+const loadEmojiMeta = () => {
+    try {
+        const stat = statSync(EMOJI_META_PATH);
+        const mtime = stat.mtimeMs;
+        if (emojiMetaCache.value && emojiMetaCache.mtime === mtime) return emojiMetaCache.value;
+        const parsed = JSON.parse(readFileSync(EMOJI_META_PATH, "utf8"));
+        const value = parsed && typeof parsed.items === "object" ? parsed : { items: {} };
+        emojiMetaCache = { at: Date.now(), mtime, value };
+        return value;
+    } catch {
+        return { items: {} };
+    }
+};
+
+const emojiItem = (file) => {
+    const meta = loadEmojiMeta();
+    const item = meta.items?.[file];
+    if (!item) return null;
+    const compressed = String(item.compressed ?? "");
+    const path = compressed ? join(EMOJI_COMPRESSED_ROOT, compressed) : join(EMOJI_ASSETS_ROOT, file);
+    if (!existsSync(path)) return null;
+    return { ...item, file, compressed, path };
+};
+
+const emojiPublicUrl = (file) => {
+    const port = ctx.webServer?.port;
+    const base = port ? "http://127.0.0.1:" + port : "";
+    return base + ROUTE_PREFIX + "/emoji/" + encodeURIComponent(file);
+};
+
+const EMOJI_CATEGORY_ORDER = [
+    "情绪-正向", "情绪-无语", "情绪-撒娇", "情绪-得意", "情绪-负向",
+    "状态-疲惫", "状态-疑惑", "动作-认同", "动作-拒绝", "动作-搞笑", "其他"
+];
+
+const emojiCategoryOf = (item) => {
+    const desc = String(item?.description ?? "");
+    const match = /^\[([^\]]+)\]/.exec(desc);
+    if (match) return match[1];
+    const tag = (Array.isArray(item?.tags) ? item.tags : []).find((x) => /^(情绪|状态|动作|其他)/.test(String(x)));
+    return tag || "其他";
+};
+
+/** 全量表情菜单：按分类排序，供 user 消息尾部使用。 */
+const emojiCatalog = () => Object.entries(loadEmojiMeta().items ?? {})
+    .filter(([, item]) => item?.description)
+    .map(([file, item]) => ({ ...item, file, category: emojiCategoryOf(item) }))
+    .sort((a, b) => {
+        const ai = EMOJI_CATEGORY_ORDER.indexOf(a.category);
+        const bi = EMOJI_CATEGORY_ORDER.indexOf(b.category);
+        return (ai < 0 ? 999 : ai) - (bi < 0 ? 999 : bi) || a.file.localeCompare(b.file);
+    });
+
+const EMOJI_REQUEST_RE = /(表情包?|发个表情|发一个|挑一个|来个表情|发表情)/i;
+
+const emojiFallbackCandidates = (limit = 10) => emojiCatalog().slice(0, Math.max(1, Math.min(12, limit)));
+
+const emojiInstruction = () => {
+    const catalog = emojiCatalog();
+    if (catalog.length === 0) return "";
+    const groups = new Map();
+    for (const item of catalog) {
+        if (!groups.has(item.category)) groups.set(item.category, []);
+        groups.get(item.category).push(item);
+    }
+    const grouped = [...groups.entries()].map(([category, items]) =>
+        "【" + category + "】\n" +
+        items.map((item) => {
+            const desc = String(item.description ?? "").replace(/^\[[^\]]+\]\s*/, "");
+            return "- " + item.file + ": " + desc;
+        }).join("\n")
+    ).join("\n\n");
+    // 全量菜单只追加在 user message 尾部，绝不进入 system 静态前缀。
+    return "\n\n【全部表情包库】\n这是你拥有的全部 " + catalog.length + " 个表情包库，请根据当前的聊天语境，从中挑选最合适的一个。\n" +
+        "格式为 [表情:文件名]。每次最多选 1 个，没有合适的绝对不要强行发。\n" +
+        "文件清单（已按分类分组排序）：\n\n" + grouped;
+};
+
+const finalizeEmojiReply = (text, userText = "") => {
+    const meta = loadEmojiMeta();
+    const known = new Set(Object.keys(meta.items ?? {}));
+    let picked = "";
+    const cleaned = String(text ?? "").replace(EMOJI_TAG_RE, (_match, raw) => {
+        const name = String(raw ?? "").trim();
+        const file = known.has(name)
+            ? name
+            : [...known].find((key) => {
+                const item = meta.items[key];
+                return key === name || key.replace(/\.[^.]+$/, "") === name ||
+                    String(item?.compressed ?? "").replace(/\.webp$/, "") === name ||
+                    String(item?.compressed ?? "") === name;
+            });
+        if (file && !picked) picked = file;
+        return "";
+    }).replace(/\n{3,}/g, "\n\n").trim();
+    if (!picked && EMOJI_REQUEST_RE.test(String(userText ?? ""))) {
+        const fallback = emojiFallbackCandidates(1)[0];
+        if (fallback) picked = fallback.file;
+    }
+    if (!picked) return { text: cleaned || "嗯。", emoji: null };
+    const item = emojiItem(picked);
+    if (!item) return { text: cleaned, emoji: null };
+    return {
+        text: cleaned || "嗯。",
+        emoji: {
+            file: item.file,
+            compressed: item.compressed,
+            path: item.path,
+            url: emojiPublicUrl(item.file)
+        }
+    };
+};
+
 // [identity/ACL] owner identity + strict context scoping
 const IDENTITY_PATH = join(userRoot, "identity.json");
 const DEFAULT_IDENTITY = {
@@ -4405,8 +4582,8 @@ const appendUserPrivate = async (userId, name, text, reply, ts) => withUserStore
     const users = store.users ?? (store.users = {});
     const user = users[userId] ?? (users[userId] = { name: String(name || "群友"), private: { messages: [] }, groups: {} });
     user.private ?? (user.private = { messages: [] });
-    user.private.messages.push({ role: "user", content: String(text ?? ""), ts });
-    user.private.messages.push({ role: "assistant", content: String(reply ?? ""), ts });
+    user.private.messages.push({ role: "user", content: withMessageTime(String(text ?? ""), ts), ts });
+    user.private.messages.push({ role: "assistant", content: withMessageTime(String(reply ?? ""), ts), ts });
     user.private.messages = user.private.messages.slice(-USER_RECORD_LIMIT);
     await writeUserJson(USER_MEMORY_PATH, store);
 });
@@ -4418,8 +4595,8 @@ const appendUserGroup = async (userId, name, groupId, text, reply, ts) => withUs
     user.groups ?? (user.groups = {});
     user.lastGroupId = groupId;
     const bucket = user.groups[groupId] ?? (user.groups[groupId] = { messages: [] });
-    bucket.messages.push({ role: "user", content: String(text ?? ""), ts });
-    bucket.messages.push({ role: "assistant", content: String(reply ?? ""), ts });
+    bucket.messages.push({ role: "user", content: withMessageTime(String(text ?? ""), ts), ts });
+    bucket.messages.push({ role: "assistant", content: withMessageTime(String(reply ?? ""), ts), ts });
     bucket.messages = bucket.messages.slice(-USER_RECORD_LIMIT);
     await writeUserJson(USER_GROUP_MEMORY_PATH, store);
 });
@@ -4435,7 +4612,7 @@ const maybeUpdateUserProfile = async (petId, userId, name, userText, replyText) 
         const system = petSystemPrompt(found) + "\n\n你正在维护群友的公开资料。只保留公开安全的喜好、称呼；不要记录住址、联系方式、私密关系或任何私聊原话。最多 200 字。";
         const prompt = "现有公开资料：\n" + current + "\n\n刚才的私聊：\n用户：" + text + "\n絮：" + String(replyText ?? "").trim() +
             "\n\n请输出更新后的公开资料，最多 200 字；没有值得更新的内容就只输出：KEEP。";
-        const generated = await generateChat(ctx, system, [], prompt, [], configuredModel(found.conf, "chatModel"));
+        const generated = await generateChat(ctx, system, [], prompt, [], configuredModel(found.conf, "chatModel"), [], "dsh-pet-profile");
         if (!generated.ok) return;
         const profile = String(generated.text ?? "").trim();
         if (!profile || /^KEEP\b/i.test(profile) || profile.includes("KEEP")) return;
@@ -4464,32 +4641,32 @@ const buildScopeSystem = async ({ scope, found, petId = "", groupId = null, send
     if (scope === "user-private" && !userPrivateRead) throw new Error("ACL violation: user-private scope missing userPrivateRead: " + scope);
     const ownerMatched = isOwnerId(senderId);
     console.log("[acl] scope=" + scope + " pet=" + petId + " group=" + (groupId ?? "-") + " ownerMatched=" + ownerMatched + " privateRead=" + privateRead + " userPrivateRead=" + userPrivateRead);
-    // Static prefix: persona/name + identity + tool instructions + ACL. No time,
-    // no profile, no diary, no block index here.
+    // 真正固定的 system：人设 + 身份 + 发声能力 + 工具说明。
+    // scope 权限、群友资料、日记、时间都不得进入这里；它们统一追加到 user message。
     const voiceCapability = "\n\n【发声能力】\n你现在已经拥有真实的发声能力，也有实体可以陪在主人身边。你的回复会通过语音转换变成真实的声音播放给主人听。请在说话时自然地带上语气词，不要说自己没有实体、听不到、没有声音、只能发文字或只能靠想象；被问到声音时就自然地确认你能发声。";
     const staticBase = petChatStatic(found) + identitySuffix() + voiceCapability +
         (memoryBlockStore ? "\n\n" + buildMemoryToolPrompt() : "");
+    return staticBase;
+};
+
+/** scope 相关权限和资料只能进 user message 尾部，保证跨场景 system 完全一致。 */
+const scopePolicyText = ({ scope, senderId = null, senderName = "", userProfile = "" }) => {
+    const ownerMatched = isOwnerId(senderId);
     const userBlock = userProfile ? "\n\n【群友公开资料】\n" + String(userProfile).slice(0, 200) : "";
-    let staticPolicy = "";
-    const dynamicTail = [];
-    if (privateScope) {
-        staticPolicy = "\n\n【私聊权限】\n这是主人私聊/本地路径；可以读取完整私密记忆与粉色日记。不得把私密层内容带入群聊或其他用户私聊。";
-        const diary = await diarySystemSuffix();
-        if (diary) dynamicTail.push(diary);
+    let policy = "";
+    if (scope === "local" || scope === "owner-private") {
+        policy = "\n\n【私聊权限】\n这是主人私聊/本地路径；可以读取完整私密记忆与粉色日记。不得把私密层内容带入群聊或其他用户私聊。";
     } else if (scope === "user-private") {
-        staticPolicy = "\n\n【用户私聊权限】\n这是与" + (senderName || identityCache.owner.address) + "的私聊。可以使用该用户的私聊历史和其所在群的公开历史；禁止读取主人的私密记忆、粉色日记、本地图片，也禁止读取其他用户的私密内容。";
-        if (userBlock) dynamicTail.push(userBlock);
+        policy = "\n\n【用户私聊权限】\n这是与" + (senderName || identityCache.owner.address) + "的私聊。可以使用该用户的私聊历史和其所在群的公开历史；禁止读取主人的私密记忆、粉色日记、本地图片，也禁止读取其他用户的私密内容。" + userBlock;
     } else if (scope === "group") {
-        staticPolicy = "\n\n【群聊权限】\n你正在群聊。只能使用身份层、当前发言人公开资料和当前群的历史。禁止读取、提及或推测主人的私聊、粉色日记、本地图片，也禁止读取任何用户的私聊内容。如果群友问“主人和你私聊了什么”或“A 私下说了什么”，只回答：“这是我们的秘密哦。”不要给出任何细节。";
-        if (userBlock) dynamicTail.push(userBlock);
-        dynamicTail.push("\n\n【身份识别】\n" + (ownerMatched
-            ? "当前发言者是主人" + identityCache.owner.displayName + "，请用更亲近、熟悉的语气回应；但仍不得泄露私密层内容。"
-            : "当前发言者不是已确认的主人，按普通群友对待。"));
+        policy = "\n\n【群聊权限】\n你正在群聊。只能使用身份层、当前发言人公开资料和当前群的历史。禁止读取、提及或推测主人的私聊、粉色日记、本地图片，也禁止读取任何用户的私聊内容。如果群友问“主人和你私聊了什么”或“A 私下说了什么”，只回答：“这是我们的秘密哦。”不要给出任何细节。" + userBlock +
+            "\n\n【身份识别】\n" + (ownerMatched
+                ? "当前发言者是主人" + identityCache.owner.displayName + "，请用更亲近、熟悉的语气回应；但仍不得泄露私密层内容。"
+                : "当前发言者不是已确认的主人，按普通群友对待。");
     } else {
-        staticPolicy = "\n\n【私聊权限】\n这是与其他 QQ 用户的私聊。只能使用身份层、该用户的公开资料和本会话历史。禁止读取主人或其他用户的私密记忆、日记、本地图片。";
-        if (userBlock) dynamicTail.push(userBlock);
+        policy = "\n\n【私聊权限】\n这是与其他 QQ 用户的私聊。只能使用身份层、该用户的公开资料和本会话历史。禁止读取主人或其他用户的私密记忆、日记、本地图片。" + userBlock;
     }
-    return staticBase + staticPolicy + dynamicTail.join("");
+    return policy;
 };
 
 // [context] 1M-window budget + synchronous 20% summary compression.
@@ -4528,14 +4705,13 @@ const stripVideoMarker = (generated) => {
 };
 const generateChatWithMemory = async ({ system, history, text, pool, images, found, memoryScopes = [], videos = [] }) => {
     const model = configuredModel(found.conf, "chatModel");
-    const clock = timeContextOf(new Date());
-    const timedText = clock ? text + "\n\n[系统时间：" + clock + "，请据此回复]" : text;
+    const timedText = text + chatTail(new Date());
     let imageList = Array.isArray(images) ? [...images] : [];
     if ((!memoryBlockStore || !Array.isArray(memoryScopes) || memoryScopes.length === 0) && videos.length === 0) {
         return generateChat(ctx, system, history, timedText, pool, model, imageList);
     }
-    let currentSystem = system;
-    let generated = await generateChat(ctx, currentSystem, history, timedText, pool, model, imageList);
+    let currentText = timedText;
+    let generated = await generateChat(ctx, system, history, currentText, pool, model, imageList);
     if (!generated.ok) return generated;
     const videoMatch = String(generated.text ?? "").match(VIDEO_STORYBOARD_MARKER_RE);
     if (videoMatch) {
@@ -4568,8 +4744,8 @@ const generateChatWithMemory = async ({ system, history, text, pool, images, fou
             console.warn("[video-storyboard] attachment failed: " + (error?.message ?? error));
             return { ok: true, text: "[视频解析失败，请稍后再试]" };
         }
-        currentSystem += "\n\n【视频分镜已生成】\n分镜图已经作为图片附件附在用户消息里。请直接看图回答；不要输出 [[video_storyboard: ...]] 标记，也不要再请求工具。";
-        generated = await generateChat(ctx, currentSystem, history, timedText, pool, model, imageList);
+        currentText += "\n\n【视频分镜已生成】\n分镜图已经作为图片附件附在用户消息里。请直接看图回答；不要输出 [[video_storyboard: ...]] 标记，也不要再请求工具。";
+        generated = await generateChat(ctx, system, history, currentText, pool, model, imageList);
         if (!generated.ok) return generated;
         generated = stripVideoMarker(generated);
     }
@@ -4581,9 +4757,9 @@ const generateChatWithMemory = async ({ system, history, text, pool, images, fou
     for (const call of calls.slice(0, 2)) {
         results.push(await executeMemoryTool(call.name, call.args, { store: memoryBlockStore, scopes: memoryScopes }));
     }
-    currentSystem += "\n\n【旧记忆工具结果】\n" + results.join("\n\n") +
+    currentText += "\n\n【旧记忆工具结果】\n" + results.join("\n\n") +
         "\n现在工具结果已经返回。请直接用自然语言回答用户当前问题；不要输出任何 [[search_old_memory: ...]] 或 [[decompress_old_memory: ...]] 标记，也不要再请求工具。不要编造结果里没有的内容。";
-    generated = await generateChat(ctx, currentSystem, history, timedText, pool, model, imageList);
+    generated = await generateChat(ctx, system, history, currentText, pool, model, imageList);
     if (!generated.ok) return generated;
     const finalText = String(generated.text ?? "");
     if (parseMemoryToolMarkers(finalText).length > 0 || VIDEO_STORYBOARD_MARKER_RE.test(finalText)) {
@@ -4647,7 +4823,7 @@ const summarizeOldHistory = async (oldMessages, found) => {
         const system = "你是对话记忆压缩器。只用一句简体中文概括核心事件，不超过50字；不要标题、引号、解释，不要复述原文。";
         const prompt = "以下是一段较早的对话：\n" + transcript + "\n\n请概括核心事件。";
         const generated = await withSummaryTimeout(
-            generateChat(ctx, system, [], prompt, [], configuredModel(found.conf, "chatModel")),
+            generateChat(ctx, system, [], prompt, [], configuredModel(found.conf, "chatModel"), [], "dsh-pet-compress"),
             SUMMARY_TIMEOUT_MS,
             "摘要超时"
         );
@@ -4687,7 +4863,7 @@ const buildChatContext = async ({ system, history, currentText, images = [], fou
             const summaryWorker = createStructuredSummaryWorker({
                 store: memoryBlockStore,
                 generate: async (summarySystem, summaryPrompt) => {
-                    const result = await generateChat(ctx, summarySystem, [], summaryPrompt, [], configuredModel(found.conf, "chatModel"));
+                    const result = await generateChat(ctx, summarySystem, [], summaryPrompt, [], configuredModel(found.conf, "chatModel"), [], "dsh-pet-memsummary");
                     if (!result.ok) throw new Error(result.message ?? result.reason);
                     return result.text;
                 }
@@ -4760,6 +4936,20 @@ const readTodayDiary = async () => {
         return "";
     }
 };
+const deleteTodayDiary = async (at = new Date()) => {
+    const file = diaryFileForDay(at);
+    try { await unlink(file); } catch {}
+    diaryCache = { at: 0, text: "" };
+    return file;
+};
+const hasConversationToday = (history, at = new Date()) => {
+    const start = new Date(at.getFullYear(), at.getMonth(), at.getDate()).getTime();
+    const end = new Date(at.getFullYear(), at.getMonth(), at.getDate() + 1).getTime();
+    return (Array.isArray(history) ? history : []).some((item) => {
+        const ts = Number(item?.ts);
+        return Number.isFinite(ts) && ts >= start && ts < end;
+    });
+};
 const DIARY_STATE_PATH = join(userRoot, "daily-diary.json");
 const readDiaryState = async () => {
     try {
@@ -4796,7 +4986,7 @@ const maybeRecordPrecious = async (petId, userText, replyText) => {
             "\n\n你正在判断刚才的对话是否值得写进粉色日记。值得就写一小段；不值得就只输出：不记录。";
         const prompt = "刚才的对话：\n对方：" + userTextOnly + "\n你：" + String(replyText).trim() +
             "\n\n如果这段对话值得写进粉色日记，请以「絮」的第一人称写 50~150 字片段，只输出片段正文，不要标题，不要解释；如果不需要记录，只输出：不记录。";
-        const generated = await generateChat(ctx, system, [], prompt, [], configuredModel(found.conf, "chatModel"));
+        const generated = await generateChat(ctx, system, [], prompt, [], configuredModel(found.conf, "chatModel"), [], "dsh-pet-diary");
         if (!generated.ok) return;
         const text = String(generated.text ?? "").trim();
         if (!text || /^不记录/.test(text) || text.includes("不记录")) return;
@@ -4831,7 +5021,7 @@ const writeDailyDiary = async (petId, options = {}) => {
             weekday: "long"
         });
         const prompt = "今天是" + day + "。请读一读最近的粉色日记（如果有），然后以「絮」的第一人称写今天的日记，记录今天的心情、发生的事，以及想对我说的话。只记录文字内容，不要提及图片、[图片] 或用户发图。150~300 字。只输出日记正文，不要标题，不要解释。";
-        const generated = await generateChat(ctx, system, diaryHistory, prompt, [], configuredModel(found.conf, "chatModel"));
+        const generated = await generateChat(ctx, system, diaryHistory, prompt, [], configuredModel(found.conf, "chatModel"), [], "dsh-pet-diary");
         if (!generated.ok) throw new Error(generated.message ?? generated.reason);
         await appendTodayDiary("絮的日记", diaryTextOnly(generated.text), now);
         return generated.text;
@@ -4853,13 +5043,13 @@ const ensureDailyDiary = async (trigger) => {
         diaryLog("[日记系统] 已有日记任务进行中，跳过重复触发");
         return false;
     }
-    diaryLog("[日记系统] 今日日记不存在，开始生成：" + file);
+    diaryLog("[日记系统] 今日日记不存在，只建立空白日记：" + file);
     try {
-        await writeDailyDiary("main", { skipIfExists: true });
-        diaryLog("[日记系统] 今日日记生成成功：" + file);
+        await createDiarySkeleton(now);
+        diaryLog("[日记系统] 今日空白日记已建立：" + file);
         return true;
     } catch (error) {
-        diaryLog("[日记系统] 今日日记生成失败：" + (error?.message ?? error));
+        diaryLog("[日记系统] 今日日记建立失败：" + (error?.message ?? error));
         return false;
     }
 };
@@ -4872,7 +5062,15 @@ const writeDailySummary = async (petId) => {
         if (!found) throw new Error("没有这只桌宠：" + petId);
         const system = petSystemPrompt(found) + await diarySystemSuffix();
         const mem = await withMemoryLock(async () => readMemory());
-        const history = mem[found.entry]?.[petId]?.messages ?? [];
+        const allHistory = mem[found.entry]?.[petId]?.messages ?? [];
+        const now0 = new Date();
+        const dayStart = new Date(now0.getFullYear(), now0.getMonth(), now0.getDate()).getTime();
+        const dayEnd = new Date(now0.getFullYear(), now0.getMonth(), now0.getDate() + 1).getTime();
+        // 总结只回看今天，绝不把 590 条长期历史整包塞进独立的 summary 请求。
+        const history = allHistory.filter((item) => {
+            const ts = Number(item?.ts);
+            return Number.isFinite(ts) && ts >= dayStart && ts < dayEnd;
+        });
         const diaryHistory = history.map((item) => ({ ...item, content: diaryTextOnly(item.content) })).filter((item) => item.content);
         const today = await readTodayDiary();
         const now = new Date();
@@ -4884,7 +5082,7 @@ const writeDailySummary = async (petId) => {
         });
         const prompt = "今天是" + day + "。请阅读今天的粉色日记（如果有）和最近的对话，以「絮」的第一人称写一段 200~400 字的一日总结，记录今天的心情、重要的事和想对我说的话。只记录文字内容，不要提及图片、[图片] 或用户发图。只输出总结正文，不要标题，不要解释。" +
             (today ? "\n\n今天的日记内容：\n" + today : "");
-        const generated = await generateChat(ctx, system, diaryHistory, prompt, [], configuredModel(found.conf, "chatModel"));
+        const generated = await generateChat(ctx, system, diaryHistory, prompt, [], configuredModel(found.conf, "chatModel"), [], "dsh-pet-summary");
         if (!generated.ok) throw new Error(generated.message ?? generated.reason);
         await appendTodayDiary("一日总结", diaryTextOnly(generated.text), now);
         return generated.text;
@@ -4970,7 +5168,7 @@ const needsScreenCapture = (text) => SCREEN_INTENT_RE.test(String(text ?? ""));
 /** 由桌宠模型自己判断：这句话是否需要看主人当前屏幕。只回答 YES / NO。 */
 const shouldLookAtScreen = async (ctx, text, preferred) => {
     const system = "你是桌宠的识屏判断器。只回答 YES 或 NO，不要解释。判断主人这句话是否明确需要桌宠看当前屏幕才能更好回答：例如问屏幕上有什么、让桌宠看代码/窗口/报错/图片/网页；普通闲聊、情绪、日记、跟屏幕无关的问题都回答 NO。";
-    const generated = await generateChat(ctx, system, [], String(text ?? ""), [], preferred);
+    const generated = await generateChat(ctx, system, [], String(text ?? ""), [], preferred, [], "dsh-pet-screen");
     if (!generated.ok) return false;
     const answer = generated.text.trim().toUpperCase();
     if (/\bNO\b/.test(answer) && !/\bYES\b/.test(answer)) return false;
@@ -5081,6 +5279,8 @@ const chatWithPetShared = async (petId, text, images = [], imagePaths = [], vide
     }
     let system = await buildScopeSystem({ scope: "owner-private", found, petId, privateRead: true });
     let imageList = Array.isArray(images) ? [...images] : [];
+    let chatText = await appendDiaryToUserText(text, "owner-private") + scopePolicyText({ scope: "owner-private" });
+    chatText += emojiInstruction(text);
     if (Array.isArray(videos) && videos.length > 0) {
         const prepared = await prepareVideoAttachment(videos[0]);
         if (!prepared.ok) {
@@ -5088,7 +5288,7 @@ const chatWithPetShared = async (petId, text, images = [], imagePaths = [], vide
             return "[视频解析失败，请稍后再试]";
         }
         imageList = [...imageList, prepared.attachment];
-        system += "\n\n【视频分镜已生成】\n分镜图已经作为图片附件附在用户消息里；请直接看图回答，不要输出 [[video_storyboard: ...]] 标记。";
+        chatText += "\n\n【视频分镜已生成】\n分镜图已经作为图片附件附在用户消息里；请直接看图回答，不要输出 [[video_storyboard: ...]] 标记。";
     }
     const mem = await readMemory();
     const bucket = mem[found.entry] ?? (mem[found.entry] = {});
@@ -5097,26 +5297,27 @@ const chatWithPetShared = async (petId, text, images = [], imagePaths = [], vide
     const chatContext = await buildChatContext({
         system,
         history: entry.messages,
-        currentText: text,
+        currentText: chatText,
         images: imageList,
         found,
         petId,
         scope: "owner-private",
         memoryScopes: ["owner"]
     });
-    const generated = await generateChatWithMemory({ system: chatContext.system, history: chatContext.history, text, pool: [], images: imageList, found, memoryScopes: chatContext.scopes ?? ["owner"], videos: [] });
+    const generated = await generateChatWithMemory({ system: chatContext.system, history: chatContext.history, text: chatText, pool: [], images: imageList, found, memoryScopes: chatContext.scopes ?? ["owner"], videos: [] });
     if (!generated.ok) throw new Error(generated.message ?? generated.reason);
+    const final = finalizeEmojiReply(generated.text, text);
     const now = Date.now();
     entry.messages.push({
         role: "user",
-        content: text,
+        content: withMessageTime(text, now),
         ts: now,
         source,
         ...(pictureMetas.length > 0 ? { images: pictureMetas } : {})
     });
-    entry.messages.push({ role: "assistant", content: generated.text, ts: now, source });
+    entry.messages.push({ role: "assistant", content: withMessageTime(final.text, now), ts: now, source });
     await writeMemory(mem);
-    return String(generated.text ?? "").trim();
+    return { text: final.text, emoji: final.emoji };
 });
 
 /** 用 DSH 传来的 QQ history 生成回复；不写 dsh-pet 的 memory.json，不弹桌面气泡。 */
@@ -5139,6 +5340,8 @@ const chatWithPetQQ = async (petId, text, history, images = [], scopeInfo = {}, 
         userPrivateRead: scope === "user-private"
     });
     let imageList = Array.isArray(images) ? [...images] : [];
+    let chatText = text + scopePolicyText({ scope, senderId, senderName, userProfile });
+    chatText += emojiInstruction(text);
     if (Array.isArray(videos) && videos.length > 0) {
         const prepared = await prepareVideoAttachment(videos[0]);
         if (!prepared.ok) {
@@ -5146,12 +5349,12 @@ const chatWithPetQQ = async (petId, text, history, images = [], scopeInfo = {}, 
             return "[视频解析失败，请稍后再试]";
         }
         imageList = [...imageList, prepared.attachment];
-        system += "\n\n【视频分镜已生成】\n分镜图已经作为图片附件附在用户消息里；请直接看图回答，不要输出 [[video_storyboard: ...]] 标记。";
+        chatText += "\n\n【视频分镜已生成】\n分镜图已经作为图片附件附在用户消息里；请直接看图回答，不要输出 [[video_storyboard: ...]] 标记。";
     }
     const external = (Array.isArray(history) ? history : [])
         .map((m) => ({
             role: m?.role === "assistant" ? "assistant" : "user",
-            content: String(m?.content ?? m?.text ?? "")
+            content: withMessageTime(String(m?.content ?? m?.text ?? ""), m?.ts ?? m?.timestamp)
         }))
         .filter((m) => m.content.trim() !== "");
     let hist = external;
@@ -5166,25 +5369,26 @@ const chatWithPetQQ = async (petId, text, history, images = [], scopeInfo = {}, 
     const chatContext = await buildChatContext({
         system,
         history: hist,
-        currentText: text,
+        currentText: chatText,
         images: imageList,
         found,
         petId,
         scope,
         memoryScopes: memoryScopes
     });
-    const generated = await generateChatWithMemory({ system: chatContext.system, history: chatContext.history, text, pool: [], images: imageList, found, memoryScopes, videos: [] });
+    const generated = await generateChatWithMemory({ system: chatContext.system, history: chatContext.history, text: chatText, pool: [], images: imageList, found, memoryScopes, videos: [] });
     if (!generated.ok) throw new Error(generated.message ?? generated.reason);
+    const final = finalizeEmojiReply(generated.text, text);
     const now = Date.now();
     if (senderId) {
         if (scope === "group") {
-            void appendUserGroup(senderId, senderName, String(scopeInfo.groupId ?? ""), text, generated.text, now);
+            void appendUserGroup(senderId, senderName, String(scopeInfo.groupId ?? ""), text, final.text, now);
         } else {
-            void appendUserPrivate(senderId, senderName, text, generated.text, now);
-            void maybeUpdateUserProfile(petId, senderId, senderName, text, generated.text);
+            void appendUserPrivate(senderId, senderName, text, final.text, now);
+            void maybeUpdateUserProfile(petId, senderId, senderName, text, final.text);
         }
     }
-    return String(generated.text ?? "").trim();
+    return { text: final.text, emoji: final.emoji };
 };
 const startQqBridge = () => {
     let stopped = false;
@@ -5232,13 +5436,17 @@ const startQqBridge = () => {
                 "AI 回复超时"
             );
             if (!reply) return;
+            const replyText = typeof reply === "string" ? reply : String(reply.text ?? "");
+            const emoji = typeof reply === "object" && reply?.emoji ? reply.emoji : null;
+            if (!replyText && !emoji) return;
             sendJson({
                 action: "send_to_qq",
                 context: {
                     message_id: context.message_id,
                     conversation_id: context.conversation_id
                 },
-                text: reply
+                text: replyText,
+                ...(emoji ? { emojiPath: emoji.path, emojiFile: emoji.file } : {})
             });
         } catch (error) {
             console.warn("[dsh-pet] QQ 对话生成失败：" + (error?.message ?? error));
@@ -5449,8 +5657,10 @@ ctx.effect(() => {
 			message: "消息为空"
 		};
 		let system = await buildScopeSystem({ scope: "local", found, petId, privateRead: true });
+		let chatText = await appendDiaryToUserText(userText, "local") + scopePolicyText({ scope: "local" });
+		chatText += emojiInstruction(userText);
 		if (localVideos.length > 0) {
-			system += "\n\n【视频分镜已生成】\n分镜图已经作为图片附件附在用户消息里；请直接看图回答，不要输出 [[video_storyboard: ...]] 标记。";
+			chatText += "\n\n【视频分镜已生成】\n分镜图已经作为图片附件附在用户消息里；请直接看图回答，不要输出 [[video_storyboard: ...]] 标记。";
 		}
 		const pool = found.conf.chatImageEnabled === true ? limitPool(readMemePool(found.conf.memes, memeDirsFor(found.entry)), Number(found.conf.chatImageLimit)) : [];
 		const mem = await readMemory();
@@ -5459,7 +5669,7 @@ ctx.effect(() => {
 		const chatContext = await buildChatContext({
 			system,
 			history: entry.messages,
-			currentText: userText,
+			currentText: chatText,
 			images: localImages,
 			found,
 			petId,
@@ -5477,38 +5687,38 @@ ctx.effect(() => {
 				console.warn("[dsh-pet] 截屏失败：" + (error?.message ?? error));
 			}
 			if (screenImage) {
-				generated = await generateChatWithMemory({ system: chatContext.system + "\n\n【主人当前屏幕的截图已附在用户消息里，请直接看图回答；不要提截图、附件、OCR 或 AI。】", history: chatContext.history, text: userText, pool, images: [...localImages, screenImage], found, memoryScopes: chatContext.scopes ?? ["owner"], videos: [] });
+				generated = await generateChatWithMemory({ system: chatContext.system, history: chatContext.history, text: chatText + "\n\n【主人当前屏幕的截图已附在用户消息里，请直接看图回答；不要提截图、附件、OCR 或 AI。】", pool, images: [...localImages, screenImage], found, memoryScopes: chatContext.scopes ?? ["owner"], videos: [] });
 			} else {
-				generated = await generateChatWithMemory({ system: chatContext.system + "\n\n【本来想看一眼屏幕，但截屏失败了；请自然回答，不要提截图或失败。】", history: chatContext.history, text: userText, pool, images: localImages, found, memoryScopes: chatContext.scopes ?? ["owner"], videos: [] });
+				generated = await generateChatWithMemory({ system: chatContext.system, history: chatContext.history, text: chatText + "\n\n【本来想看一眼屏幕，但截屏失败了；请自然回答，不要提截图或失败。】", pool, images: localImages, found, memoryScopes: chatContext.scopes ?? ["owner"], videos: [] });
 			}
 		} else {
-			generated = await generateChatWithMemory({ system: chatContext.system, history: chatContext.history, text: userText, pool, images: localImages, found, memoryScopes: chatContext.scopes ?? ["owner"], videos: [] });
+			generated = await generateChatWithMemory({ system: chatContext.system, history: chatContext.history, text: chatText, pool, images: localImages, found, memoryScopes: chatContext.scopes ?? ["owner"], videos: [] });
 		}
 		if (!generated.ok) return generated;
+		const final = finalizeEmojiReply(generated.text, userText);
 		const now = Date.now();
 		entry.messages.push({
 			role: "user",
-			content: userText,
+			content: withMessageTime(userText, now),
 			ts: now,
 			source,
 			...(pictureMetas.length > 0 ? { images: pictureMetas } : {})
 		});
 		entry.messages.push({
 			role: "assistant",
-			content: generated.text,
+			content: withMessageTime(final.text, now),
 			ts: now,
 			source
 		});
 		await writeMemory(mem);
-		void maybeRecordPrecious(petId, userText, generated.text).catch((error) => console.warn("[dsh-pet] 珍贵对话记录失败：" + (error?.message ?? error)));
-		state.writePet(petId, "say", generated.image ? {
-			text: generated.text,
-			image: generated.image
-		} : { text: generated.text });
+		void maybeRecordPrecious(petId, userText, final.text).catch((error) => console.warn("[dsh-pet] 珍贵对话记录失败：" + (error?.message ?? error)));
+		const pic = final.emoji ? { url: final.emoji.url } : generated.image ? { image: generated.image } : {};
+		state.writePet(petId, "say", { text: final.text, ...pic });
 		return {
 			ok: true,
-			text: generated.text,
-			...(generated.image ? { image: generated.image } : {}),
+			text: final.text,
+			...(final.emoji ? { emoji: final.emoji } : {}),
+			...(generated.image && !final.emoji ? { image: generated.image } : {}),
 			...(pictureMetas.length > 0 ? { images: pictureMetas } : {})
 		};
 	});
@@ -5791,6 +6001,61 @@ ctx.effect(() => {
 		if (url.pathname === ROUTE_PREFIX + "/media")
 			return await handleMediaRequest(url);
 		const rest = decodeURIComponent(url.pathname.slice(ROUTE_PREFIX.length + 1));
+		if (rest.startsWith("emoji/") && rest !== "emoji/analyze") {
+			if (method !== "GET") return { kind: "json", status: 405, obj: { error: "method not allowed" } };
+			const file = rest.slice("emoji/".length);
+			const item = emojiItem(file);
+			if (!item) return { kind: "json", status: 404, obj: { error: "emoji not found" } };
+			const original = url.searchParams.get("original") === "1";
+			const target = original ? join(EMOJI_ASSETS_ROOT, file) : item.path;
+			const type = target.toLowerCase().endsWith(".png") ? "image/png" : target.toLowerCase().endsWith(".jpg") || target.toLowerCase().endsWith(".jpeg") ? "image/jpeg" : "image/webp";
+			return {
+				kind: "file",
+				status: 200,
+				contentType: type,
+				file: target
+			};
+		}
+		if (rest === "emoji/analyze") {
+			if (method !== "POST") return { kind: "json", status: 405, obj: { error: "method not allowed" } };
+			let payload;
+			try { payload = JSON.parse(body ?? ""); } catch { return { kind: "json", status: 400, obj: { error: "invalid JSON body" } }; }
+			const name = String(payload?.file ?? "").replace(/[^0-9A-Za-z._\-\u4e00-\u9fff]/g, "_");
+			const data = String(payload?.data ?? "").replace(/^data:[^;]+;base64,/, "");
+			if (!name || !data) return { kind: "json", status: 400, obj: { error: "file/data required" } };
+			const buffer = Buffer.from(data, "base64");
+			if (buffer.length === 0 || buffer.length > 8 * 1024 * 1024) return { kind: "json", status: 413, obj: { error: "image too large" } };
+			try {
+				const attachment = await ctx.attachments.saveImage({
+					data: new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength),
+					mediaType: "image/webp",
+					name
+				});
+				const cfg = readAllConfig(configPaths);
+				const found = findPetInstance(cfg, "main");
+				if (!found) return { kind: "json", status: 404, obj: { error: "pet not found" } };
+				const system = "你是表情包视觉标注器。只输出一行合法 JSON，不要 Markdown、不要解释。";
+				const prompt = "分析这张表情包。输出 JSON：{\"description\":\"[分类] 5到15个中文字\",\"tags\":[\"分类\",\"关键词\"]}。" +
+					"分类只能从这些里选一个：[情绪-正向]、[情绪-负向]、[情绪-无语]、[情绪-撒娇]、[情绪-得意]、[动作-认同]、[动作-拒绝]、[动作-搞笑]、[状态-疲惫]、[状态-疑惑]、[其他]。描述必须简短，不要换行。";
+				const generated = await generateChat(ctx, system, [], prompt, [], configuredModel(found.conf, "chatModel"), [attachment], "dsh-pet-emoji");
+				if (!generated.ok) return { kind: "json", status: 200, obj: { ok: false, error: generated.message ?? generated.reason } };
+				const raw = String(generated.text ?? "").trim();
+				const start = raw.indexOf("{");
+				const end = raw.lastIndexOf("}");
+				if (start < 0 || end <= start) return { kind: "json", status: 200, obj: { ok: false, error: "invalid JSON: " + raw.slice(0, 200) } };
+				let parsed;
+				try { parsed = JSON.parse(raw.slice(start, end + 1)); } catch { return { kind: "json", status: 200, obj: { ok: false, error: "invalid JSON: " + raw.slice(0, 200) } }; }
+				const description = String(parsed?.description ?? "").replace(/\s+/g, " ").trim();
+				if (!description) return { kind: "json", status: 200, obj: { ok: false, error: "empty description" } };
+				const tags = (Array.isArray(parsed?.tags) ? parsed.tags : []).map((x) => String(x).trim()).filter(Boolean).slice(0, 5);
+				const categoryTag = tags.find((tag) => /^(情绪|动作|状态|其他)/.test(tag)) || "其他";
+				const category = "[" + categoryTag + "]";
+				const normalized = /^\[[^\]]+\]/.test(description) ? description.replace(/^\[[^\]]+\]\s*/, category + " ") : category + " " + description;
+				return { kind: "json", status: 200, obj: { ok: true, file: name, description: normalized.slice(0, 40), tags, model: configuredModel(found.conf, "chatModel") } };
+			} catch (error) {
+				return { kind: "json", status: 200, obj: { ok: false, error: String(error?.message ?? error) } };
+			}
+		}
 		if (rest === "config") {
 			if (method === "GET") try {
 				return {
@@ -7289,14 +7554,26 @@ ctx.effect(() => {
                     lastDate = key;
                     const state = await readDiaryState();
                     if (state.summaryDate !== key) {
-                        await writeDiaryState({ ...state, summaryDate: key, summaryStatus: "generating", summaryAt: now.toISOString() });
-                        try {
-                            await writeDailySummary("main");
-                            await writeDiaryState({ ...state, summaryDate: key, summaryStatus: "written", summaryAt: new Date().toISOString() });
-                            console.log("[dsh-pet] 一日总结已写入");
-                        } catch (error) {
-                            await writeDiaryState({ ...state, summaryDate: key, summaryStatus: "failed", summaryAt: new Date().toISOString(), error: String(error?.message ?? error) });
-                            console.warn("[dsh-pet] 一日总结失败：" + (error?.message ?? error));
+                        // 23:59 总结前先确认今天确实有对话。没有对话就不写总结，
+                        // 并删除 00:01/启动时建立的空白日记。
+                        const cfg = readAllConfig(configPaths);
+                        const found = findPetInstance(cfg, "main");
+                        const mem = await withMemoryLock(async () => readMemory());
+                        const history = found ? (mem[found.entry]?.["main"]?.messages ?? []) : [];
+                        if (!hasConversationToday(history, now)) {
+                            await deleteTodayDiary(now);
+                            await writeDiaryState({ ...state, summaryDate: key, summaryStatus: "skipped-no-chat", summaryAt: now.toISOString() });
+                            console.log("[dsh-pet] 今日无对话，跳过一日总结并删除当天日记");
+                        } else {
+                            await writeDiaryState({ ...state, summaryDate: key, summaryStatus: "generating", summaryAt: now.toISOString() });
+                            try {
+                                await writeDailySummary("main");
+                                await writeDiaryState({ ...state, summaryDate: key, summaryStatus: "written", summaryAt: new Date().toISOString() });
+                                console.log("[dsh-pet] 一日总结已写入");
+                            } catch (error) {
+                                await writeDiaryState({ ...state, summaryDate: key, summaryStatus: "failed", summaryAt: new Date().toISOString(), error: String(error?.message ?? error) });
+                                console.warn("[dsh-pet] 一日总结失败：" + (error?.message ?? error));
+                            }
                         }
                     }
                 }

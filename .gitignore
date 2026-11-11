@@ -48,6 +48,9 @@ assets/**/*.bin3
 assets/**/*.png
 *.wpk
 
+# Emoji source images (local originals; only the compressed webp set ships)
+assets/emojis/
+
 # Local media tools (ffmpeg 二进制等，不上传)
 tools/
 

@@ -8,7 +8,7 @@ import { chunkMarkdownText } from "../transport/chunker.js";
 import { PetBridge } from "../pet-bridge/server.js";
 import { QqMemory } from "../pet-bridge/memory.js";
 import { processInboundImage } from "../pet-bridge/image.js";
-import { appendFileSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { QuestionChannel } from "../features/question-channel.js";
@@ -167,10 +167,18 @@ export async function bootstrapGateway(ctx, agents, config, logger) {
             portCount: 10,
             discoveryPath: join(qqDir, "pet-bridge.json"),
             logger,
-            sendReply: async (target, text) => {
+            sendReply: async (target, text, emojiPath) => {
                 const chunks = chunkMarkdownText(text, Number(config.textChunkLimit) || 4500);
                 for (const chunk of chunks) {
                     await sendResolvedMarkdown(bot, resolveReplyTarget(target, petReplyLimiter, true), chunk);
+                }
+                if (emojiPath && existsSync(emojiPath)) {
+                    try {
+                        await bot.sendImage(resolveReplyTarget(target, petReplyLimiter, false), { localPath: emojiPath });
+                        logger?.debug?.("[pet] emoji image sent: " + emojiPath);
+                    } catch (error) {
+                        logger?.warn?.("[pet] emoji image send failed: " + (error?.message ?? error));
+                    }
                 }
                 void maybeSendPetVoice(bot, target, text, config, petReplyLimiter, logger);
             },
