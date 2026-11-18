@@ -7578,6 +7578,9 @@ if (rest === "diary") {
 	};
 	const ensureGsvRunning = async () => {
 		const cfg = readGsvLauncher();
+		// 任何一次"确保运行"都算活动：否则手动点「恢复语音」后空闲计时没重置，
+		// 刚起来一分钟就又被看门狗睡掉。
+		gsvLastUsedAt = Date.now();
 		if (!cfg.autoStart) {
 			gsvState.reason = "autoStart disabled";
 			appendGsvLog("autoStart disabled, skip spawn");
