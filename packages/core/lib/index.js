@@ -3786,7 +3786,18 @@ function readBody(req) {
 }
 function apply(ctx) {
 	const dshHome = resolveDshHome();
-	const runtimeConfig = loadRuntimeConfig(dshHome);
+	let runtimeConfig = loadRuntimeConfig(dshHome);
+/** 重新读取 pink-diary-pet.json（diaryDir / 记忆开关 / 视频路径等），供「重载配置」使用。
+ *  注意：少数派生的常量（上下文预算、memoryBlockStore）仍在 apply 时确定，那部分需要重启。 */
+const reloadRuntimeConfig = () => {
+    try {
+        runtimeConfig = loadRuntimeConfig(dshHome);
+        return true;
+    } catch (error) {
+        console.warn("[dsh-pet] 重载 runtimeConfig 失败：" + String(error?.message ?? error));
+        return false;
+    }
+};
 	const memoryBlockStore = runtimeConfig.memoryBlocksEnabled
 		? createMemoryBlockStore({ filePath: runtimeConfig.memoryBlocksFile })
 		: null;
@@ -4669,6 +4680,26 @@ const BEHAVIOR_FORMAT_RULES = "\n\n【行为与格式绝对准则】\n" +
     "1. 如果上一句主人说要去进行某种耗时的事件（如睡觉、洗澡、吃饭），而当前时间距离上一句仅仅过去了几分钟，你应该意识到他只是短暂离开。当根据时间常识意识到不合理时，你必须结合常识拆穿他（例如：才去了几十秒就回来啦，是不是根本没洗~）。\n" +
     "2. 如果对话之间间隔极短，就当做连续聊天自然接话；如果间隔较长，可以视情况自然地顺延话题。";
 
+/**
+ * 行为准则文本：用户配置 main-config.jsonc 里的顶层 `behaviorRules`（字符串）可**整体替换**
+ * 内置文本。这样改规则不用改代码、重启，右键「重载配置」即可生效。
+ * 未配置时用内置 BEHAVIOR_FORMAT_RULES。
+ */
+const behaviorRulesText = () => {
+    try {
+        const cfg = readAllConfig(configPaths);
+        const custom = cfg && typeof cfg.behaviorRules === "string" ? cfg.behaviorRules.trim() : "";
+        if (custom) return {
+            text: custom,
+            source: "config"
+        };
+    } catch {}
+    return {
+        text: BEHAVIOR_FORMAT_RULES,
+        source: "builtin"
+    };
+};
+
 const buildScopeSystem = async ({ scope, found, petId = "", groupId = null, senderId = null, senderName = "", privateRead = false, userPrivateRead = false, userProfile = "" }) => {    const allowed = new Set(["local", "owner-private", "user-private", "group", "other-private"]);
     if (!allowed.has(scope)) throw new Error("ACL violation: unknown scope " + scope);
     const privateScope = scope === "local" || scope === "owner-private";
@@ -4683,7 +4714,7 @@ const buildScopeSystem = async ({ scope, found, petId = "", groupId = null, send
     const voiceCapability = "\n\n【发声能力】\n你现在已经拥有真实的发声能力，也有实体可以陪在主人身边。你的回复会通过语音转换变成真实的声音播放给主人听。请在说话时自然地带上语气词，不要说自己没有实体、听不到、没有声音、只能发文字或只能靠想象；被问到声音时就自然地确认你能发声。";
     const staticBase = petChatStatic(found) + identitySuffix() + voiceCapability +
         (memoryBlockStore ? "\n\n" + buildMemoryToolPrompt() : "") +
-        BEHAVIOR_FORMAT_RULES;
+        behaviorRulesText().text;
     return staticBase;
 };
 
@@ -6248,11 +6279,41 @@ ctx.effect(() => {
 				status: 405,
 				obj: { error: "method not allowed" }
 			};
+			// 1) 用户配置（main-config.jsonc）：readAllConfig 每次现读，无需处理
+			// 2) 运行时配置（pink-diary-pet.json）：重新加载
+			const runtimeOk = reloadRuntimeConfig();
+			// 3) 身份层：丢弃缓存，下一次用到时重新读 identity.json
+			identityCache = DEFAULT_IDENTITY;
+			identityLoading = null;
+			// 4) 表情包元数据：强制失效（mtime 机制之外的保险）
+			emojiMetaCache = {
+				at: 0,
+				mtime: 0,
+				value: null
+			};
+			// 5) 桌面窗口：按最新配置重建（原有行为）
 			syncDesktop();
+			const pets = (() => {
+				try {
+					return flattenPetList(readAllConfig(configPaths)).length;
+				} catch {
+					return null;
+				}
+			})();
 			return {
 				kind: "json",
 				status: 200,
-				obj: { reloading: true }
+				obj: {
+					reloading: true,
+					reloaded: {
+						runtimeConfig: runtimeOk,
+						identity: true,
+						emojiMeta: true,
+						desktop: true
+					},
+					pets,
+					behaviorRules: behaviorRulesText().source
+				}
 			};
 		}
 		if (rest === "config/meta") return {

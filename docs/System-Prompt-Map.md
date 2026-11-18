@@ -119,3 +119,47 @@ withMessageTime(text, ts)            index.js:3305   → 历史消息的 [MM-DD 
 ```
 
 三者的共同前提：**规则管大部分，代码兜剩下的**。
+
+## 9. 「重载配置」到底重载了什么（2026-11-18 修好）
+
+以前 `POST /dsh-pet-7340/reload` 只做一件事：重启桌面宠物窗口（`syncDesktop`），
+**配置一个都没重读**。现在它会：
+
+```text
+① pink-diary-pet.json   → reloadRuntimeConfig()：diaryDir / 图片目录 / 视频路径 / 上下文参数
+② identity.json         → 丢弃 identityCache，下次用到时重新读
+③ emoji 元数据          → 强制失效缓存
+④ main-config.jsonc     → 本来就是每次现读（人设、宠物列表、模型、表情池）
+⑤ 桌面窗口              → syncDesktop() 重建（原有行为）
+```
+
+返回体会告诉你各段是否成功：
+
+```json
+{ "reloading": true,
+  "reloaded": { "runtimeConfig": true, "identity": true, "emojiMeta": true, "desktop": true },
+  "pets": 1,
+  "behaviorRules": "builtin" }
+```
+
+### 9.1 行为规则可以直接写进配置（改规则不用重启）
+
+`~/.dsh/xilian/pet/main-config.jsonc` 顶层新增可选字段 `behaviorRules`（字符串）：
+
+```jsonc
+"behaviorRules": "\n\n【行为与格式绝对准则】\n1. ……"
+```
+
+- 配了 → **整体替换**内置的 `BEHAVIOR_FORMAT_RULES`（`behaviorRulesText()`，index.js:4688）
+- 没配 → 用内置文本
+- 返回体里的 `behaviorRules` 字段会说明当前用的是 `"config"` 还是 `"builtin"`
+
+这样调规则文字 → 保存 → 右键「重载配置」→ 下一条回复就生效。
+
+### 9.2 仍然需要重启的
+
+```text
+memoryBlocksEnabled（记忆块开关）    apply 时创建 store
+上下文预算 / 压缩比例                 apply 时算成常量
+第三方插件代码（qqbot 补丁等）        由 DSH 启动时加载
+```
