@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readFileSync, writeFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -56,19 +56,29 @@ const copy = (source, target) => {
         console.warn("skip missing: " + source);
         return;
     }
+    // 目标若已是指向源的符号链接（profile 里的 link: 依赖），cpSync 会因为
+    // "src and dest cannot be the same" 直接抛错——这种情况本来就无需复制。
+    try {
+        if (existsSync(target) && realpathSync(source) === realpathSync(target)) {
+            console.log((dryRun ? "[dry-run] " : "") + "skip (already linked): " + source);
+            return;
+        }
+    } catch {
+        // realpath 解析失败（路径还没建等）就按普通复制处理
+    }
     console.log((dryRun ? "[dry-run] " : "") + source + " -> " + target);
     if (!dryRun) cpSync(source, target, { recursive: true, force: true });
 };
 
-const hostDir = join(modulesDir, "dsh-pet");
+// ============================================================
+// 自研内核（fork 自 dsh-pet 0.3.8，包名 dsh-xilian-core）
+// 整包部署：packages/core -> node_modules/dsh-xilian-core
+// 官方 dsh-pet 保持原样不动，仅从 bundles 里禁用，便于回退。
+// 从此 packages/core/lib/* 是唯一真源；src/dsh-pet-host 为历史镜像，不再部署。
+// ============================================================
+const coreDir = join(modulesDir, "dsh-xilian-core");
 const qqDir = join(modulesDir, "@tencent-connect", "dsh-qqbot");
-copy(join(root, "src", "dsh-pet-host", "index.js"), join(hostDir, "lib", "index.js"));
-copy(join(root, "src", "dsh-pet-host", "client.js"), join(hostDir, "lib", "client.js"));
-copy(join(root, "src", "dsh-pet-host", "config.js"), join(hostDir, "lib", "config.js"));
-for (const moduleName of ["memory-blocks.js", "memory-search.js", "memory-summary.js", "memory-context.js", "memory-tools.js"]) {
-    copy(join(root, "src", "dsh-pet-host", moduleName), join(hostDir, "lib", moduleName));
-}
-copy(join(root, "src", "dsh-pet-host", "runtime", "electron-helper"), join(hostDir, "runtime", "electron-helper"));
+copy(join(root, "packages", "core"), coreDir);
 copy(join(root, "src", "qqbot", "gateway"), join(qqDir, "dist", "gateway"));
 copy(join(root, "src", "qqbot", "pet-bridge"), join(qqDir, "dist", "pet-bridge"));
 copy(join(root, "src", "qqbot", "config.js"), join(qqDir, "dist", "config.js"));
