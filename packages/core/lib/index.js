@@ -4419,7 +4419,7 @@ const finalizeEmojiReply = (text, userText = "") => {
     const known = new Set(Object.keys(meta.items ?? {}));
     let picked = "";
     let voiceRequested = false;
-    const cleaned = String(text ?? "").replace(EMOJI_TAG_RE, (_match, raw) => {
+    const cleanedRaw = String(text ?? "").replace(EMOJI_TAG_RE, (_match, raw) => {
         const name = String(raw ?? "").trim();
         const file = known.has(name)
             ? name
@@ -4435,9 +4435,16 @@ const finalizeEmojiReply = (text, userText = "") => {
         voiceRequested = true;
         return "";
     })
-        // 防御：模型偶尔模仿历史格式，在回复开头输出 "[MM-DD HH:MM:SS]"，剥掉
-        .replace(/^\[\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\]\s*/, "")
         .replace(/\n{3,}/g, "\n\n").trim();
+    // 防御：模型会模仿历史里的时间戳（[20:28:22]、[11-18 20:28]、[2026-11-18 20:28:22]），
+    // 循环剥掉开头的时间戳，最多三次（避免嵌套）。
+    let cleaned = cleanedRaw;
+    for (let guard = 0; guard < 3; guard += 1) {
+        const next = cleaned.replace(/^\s*\[\s*(?:\d{4}-\d{2}-\d{2}[ T])?(?:\d{2}-\d{2}\s+)?\d{1,2}:\d{2}(?::\d{2})?\s*\]\s*/, "");
+        if (next === cleaned) break;
+        cleaned = next;
+    }
+    cleaned = cleaned.trim();
     if (!picked && EMOJI_REQUEST_RE.test(String(userText ?? ""))) {
         const fallback = emojiFallbackCandidates(1)[0];
         if (fallback) picked = fallback.file;
@@ -4635,9 +4642,10 @@ const maybeUpdateUserProfile = async (petId, userId, name, userText, replyText) 
 };
 const BEHAVIOR_FORMAT_RULES = "\n\n【行为与格式绝对准则】\n" +
     "1. 你拥有一个专属表情包库。使用表情包时，格式必须严格为 [表情:文件名]，文件名必须严格从【本回合可用表情包列表】中选取，每次最多选 1 个，没有合适的绝对不要强行发。\n" +
-    "2. 必须选用标点符号（如 ~、！、？、...... 等）和 [表情:文件名] 中任一或任二来代替括号里的动作和心理描写。\n" +
+    "2. 禁止用（）（）等括号包裹动作、心理或旁白描写，也不要写舞台提示或第三人称叙述；情绪一律靠标点（~、！、？、……）和 [表情:文件名] 表达，直接对主人说话。\n" +
     "3. 至于可爱的“♪”，絮想用的时候就可以自然用出来哦。\n" +
-    "4. 当主人明确要求你使用语音（比如“发语音”、“想听你的声音”等）时，请在句末加上 [语音] 标签。\n\n" +
+    "4. 当主人明确要求你使用语音（比如“发语音”、“想听你的声音”等）时，请在句末加上 [语音] 标签。\n" +
+    "5. 绝对不要在你的回复里输出时间戳（形如 [20:28:22]、[11-18 20:28]、[2026-11-18 20:28:22]）。时间只作为你的背景常识，不是你要写出来的内容；也不要复述“当前时间”。\n\n" +
     "【时间逻辑与常识推理】\n" +
     "你的历史记录带有绝对时间戳，当前时间已知，但请把这些时间当做你的“潜意识背景常识”，不要刻意去计算或频繁报时。请利用时间差进行常识判断：\n" +
     "1. 如果上一句主人说要去进行某种耗时的事件（如睡觉、洗澡、吃饭），而当前时间距离上一句仅仅过去了几分钟，你应该意识到他只是短暂离开。当根据时间常识意识到不合理时，你必须结合常识拆穿他（例如：才去了几十秒就回来啦，是不是根本没洗~）。\n" +
@@ -7166,6 +7174,24 @@ if (rest === "diary") {
         };
     }
 }
+		if (rest === "prompt") {
+			if (method !== "GET") return {
+				kind: "json",
+				status: 405,
+				obj: { error: "method not allowed" }
+			};
+			let cfgCacheP;
+			const cfgP = () => cfgCacheP ?? (cfgCacheP = readAllConfig(configPaths));
+			const who = requirePet(url.searchParams, cfgP, { surface: false });
+			if (!who.ok) return who.res;
+			const found = { conf: who.conf, entry: who.entry, pet: who.pet };
+			const system = await buildScopeSystem({ scope: "local", found, petId: who.petId, privateRead: true });
+			return {
+				kind: "json",
+				status: 200,
+				obj: { ok: true, pet: who.petId, entry: who.entry, length: system.length, system }
+			};
+		}
 		if (rest === "chat") {
 			if (method !== "GET" && method !== "POST") return {
 				kind: "json",
