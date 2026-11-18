@@ -1,5 +1,6 @@
-import { createReadStream, existsSync, fstatSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { createReadStream, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { appendFileSync } from "node:fs";
+import { connect as netConnect } from "node:net";
 import { mkdir, readdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, normalize, resolve, sep } from "node:path";
@@ -7405,15 +7406,22 @@ if (rest === "diary") {
 			seed: numOr(cfg.seed, -1)
 		});
 		let response;
+		const postTts = () => fetch(apiUrl + "/tts", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body,
+			signal: AbortSignal.timeout(120000)
+		});
 		try {
-			response = await fetch(apiUrl + "/tts", {
-				method: "POST",
-				headers: { "content-type": "application/json" },
-				body,
-				signal: AbortSignal.timeout(120000)
-			});
+			response = await postTts();
 		} catch (error) {
-			throw new Error("无法连接 GPT-SoVITS（" + apiUrl + "）：" + String(error?.message ?? error));
+			// 冷启动期：服务刚被拉起、模型还在加载。等 3 秒再试一次，避免第一个请求白丢。
+			await new Promise((resolveWait) => setTimeout(resolveWait, 3000));
+			try {
+				response = await postTts();
+			} catch (error2) {
+				throw new Error("无法连接 GPT-SoVITS（" + apiUrl + "）：" + String(error2?.message ?? error2));
+			}
 		}
 		if (!response.ok) throw new Error("GPT-SoVITS 合成失败（HTTP " + response.status + "）");
 		const buffer = Buffer.from(await response.arrayBuffer());
@@ -7480,6 +7488,109 @@ if (rest === "diary") {
 	} catch (error) {
 		console.warn("[xilian] TTS 路由注册失败（语音将不可用）：" + String(error?.message ?? error));
 	}
+	const GSV_LOG_DIR = join(resolveDshHome(), "xilian-tts");
+	const GSV_LAUNCH_LOG = join(GSV_LOG_DIR, "gpt-sovits.log");
+	const GSV_SERVER_LOG = join(GSV_LOG_DIR, "gpt-sovits-server.log");
+	const gsvState = { listening: false, childPid: 0, lastStartAt: 0, lastReadyAt: 0, lastError: null, reason: "" };
+	const appendGsvLog = (msg) => {
+		try {
+			mkdirSync(GSV_LOG_DIR, { recursive: true });
+			appendFileSync(GSV_LAUNCH_LOG, new Date().toISOString() + " " + msg + "\n");
+		} catch {
+			// 日志失败不影响启动
+		}
+	};
+	const probeTcp = (port, timeoutMs = 500) => new Promise((done) => {
+		let settled = false;
+		const socket = netConnect({ host: "127.0.0.1", port });
+		const finish = (ok) => {
+			if (settled) return;
+			settled = true;
+			try { socket.destroy(); } catch {}
+			done(ok);
+		};
+		socket.setTimeout(timeoutMs);
+		socket.once("connect", () => finish(true));
+		socket.once("timeout", () => finish(false));
+		socket.once("error", () => finish(false));
+	});
+	const readGsvLauncher = () => {
+		const settings = readGsvSettings();
+		const launcher = settings.launcher && typeof settings.launcher === "object" ? settings.launcher : {};
+		return {
+			autoStart: launcher.autoStart !== false && String(process.env.DSH_GSV_AUTOSTART ?? "1") !== "0",
+			port: numOr(launcher.port, 9880),
+			python: String(launcher.python || process.env.DSH_GSV_PYTHON || "D:\\tools\\miniconda3\\envs\\GPT\\python.exe"),
+			repo: String(launcher.repo || process.env.DSH_GSV_REPO || "D:\\tools\\GPT-SoVITS\\GPT-SoVITS-V2ProPlus-Windows-main"),
+			waitSeconds: numOr(launcher.waitSeconds, 180)
+		};
+	};
+	const waitForGsv = async (port, waitSeconds, startedAt) => {
+		const deadline = Date.now() + waitSeconds * 1000;
+		while (Date.now() < deadline) {
+			await new Promise((resolveWait) => setTimeout(resolveWait, 2000));
+			if (await probeTcp(port)) {
+				gsvState.listening = true;
+				gsvState.lastReadyAt = Date.now();
+				appendGsvLog("ready on " + port + " after " + Math.round((Date.now() - startedAt) / 1000) + "s");
+				return;
+			}
+		}
+		gsvState.lastError = "timeout waiting for port " + port;
+		appendGsvLog(gsvState.lastError);
+	};
+	const ensureGsvRunning = async () => {
+		const cfg = readGsvLauncher();
+		if (!cfg.autoStart) {
+			gsvState.reason = "autoStart disabled";
+			appendGsvLog("autoStart disabled, skip spawn");
+			return;
+		}
+		if (await probeTcp(cfg.port)) {
+			gsvState.listening = true;
+			gsvState.reason = "already running";
+			appendGsvLog("already listening on " + cfg.port + ", skip spawn");
+			return;
+		}
+		if (!existsSync(cfg.python)) {
+			gsvState.lastError = "python not found: " + cfg.python;
+			appendGsvLog(gsvState.lastError);
+			return;
+		}
+		if (!existsSync(join(cfg.repo, "api_v2.py"))) {
+			gsvState.lastError = "api_v2.py not found: " + cfg.repo;
+			appendGsvLog(gsvState.lastError);
+			return;
+		}
+		try {
+			mkdirSync(GSV_LOG_DIR, { recursive: true });
+			const fd = openSync(GSV_SERVER_LOG, "a");
+			const child = spawn(cfg.python, ["api_v2.py", "-a", "127.0.0.1", "-p", String(cfg.port)], {
+				cwd: cfg.repo,
+				detached: true,
+				windowsHide: true,
+				stdio: ["ignore", fd, fd]
+			});
+			child.unref();
+			gsvState.childPid = child.pid || 0;
+			gsvState.lastStartAt = Date.now();
+			gsvState.reason = "spawned";
+			appendGsvLog("spawned pid=" + gsvState.childPid + " python=" + cfg.python + " port=" + cfg.port);
+			void waitForGsv(cfg.port, Math.max(30, cfg.waitSeconds), gsvState.lastStartAt);
+		} catch (error) {
+			gsvState.lastError = String(error?.message ?? error);
+			appendGsvLog("spawn failed: " + gsvState.lastError);
+		}
+	};
+	ctx.effect(() => ctx.webServer.register({
+		kind: "exact",
+		path: "/dsh-tts-api/gsv-status",
+		handler: async (req, res) => {
+			gsvState.listening = await probeTcp(numOr(readGsvLauncher().port, 9880));
+			sendJson(res, 200, { ...gsvState, settings: readGsvLauncher(), launcherLog: GSV_LAUNCH_LOG });
+		}
+	}), "dsh-xilian-core: /dsh-tts-api/gsv-status");
+	void ensureGsvRunning();
 	ctx.effect(() => ctx.webServer.register({
 		kind: "prefix",
 		path: ROUTE_PREFIX,
