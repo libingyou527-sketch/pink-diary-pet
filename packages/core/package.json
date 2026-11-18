@@ -23,14 +23,14 @@
     "url": "https://github.com/PC2005-cloud/dsh-pet/issues"
   },
   "type": "module",
-  "main": "lib/index.js",
+  "main": "lib/boot.js",
   "bin": {
     "xilian-core": "lib/standalone.js"
   },
   "exports": {
     ".": {
       "types": "./lib/types/index.d.ts",
-      "default": "./lib/index.js"
+      "default": "./lib/boot.js"
     },
     "./client": {
       "types": "./lib/types/client/index.d.ts",
