@@ -3312,7 +3312,10 @@ const withMessageTime = (text, ts = Date.now()) => {
 const chatTail = (now = new Date(), emojiText = "") => {
 	const stamp = now.getFullYear() + "-" + pad2(now.getMonth() + 1) + "-" + pad2(now.getDate()) +
 		" " + pad2(now.getHours()) + ":" + pad2(now.getMinutes()) + ":" + pad2(now.getSeconds());
-	return "\n\n[当前系统时间：" + stamp + "]" + String(emojiText || "");
+	// 发声自检放在最靠近生成点的位置（user 尾部）：模型对紧邻的指令更敏感，
+	// 而 system 里的同类要求会被长上下文稀释。这一行只进 prompt，不入记忆。
+	const voiceCheck = "\n[发声自检：如果这条回复是想让主人听见声音的，就在最后单独写一行 [语音]；不写就只有文字]";
+	return "\n\n[当前系统时间：" + stamp + "]" + voiceCheck + String(emojiText || "");
 };
 
 
@@ -4665,9 +4668,12 @@ const BEHAVIOR_FORMAT_RULES = "\n\n【行为与格式绝对准则】\n" +
  */
 const behaviorRulesText = () => {
     try {
-        const cfg = readAllConfig(configPaths);
-        const custom = cfg && typeof cfg.behaviorRules === "string" ? cfg.behaviorRules.trim() : "";
-        if (custom) return {
+        // 注意：readAllConfig 会按已知键合并，自定义键（如 behaviorRules）会被丢掉，
+        // 所以这里直接读用户配置原文，去掉整行 // 注释后解析。
+        const rawText = readFileSync(userConfigPath, "utf8");
+        const stripped = rawText.replace(/^\s*\/\/.*$/gm, "");
+        const custom = JSON.parse(stripped)?.behaviorRules;
+        if (typeof custom === "string" && custom.trim() !== "") return {
             text: custom,
             source: "config"
         };
