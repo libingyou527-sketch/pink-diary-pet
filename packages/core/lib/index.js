@@ -4451,6 +4451,18 @@ const finalizeEmojiReply = (text, userText = "") => {
         cleaned = next;
     }
     cleaned = cleaned.trim();
+    // 去掉所有括号旁白（动作/心理/舞台提示）：全角（）与半角() 都剥，最多两轮以处理相邻情况。
+    // 表情包标签用的是 [表情:xxx]，方括号不受影响。
+    for (let guard = 0; guard < 2; guard += 1) {
+        const next = cleaned
+            .replace(/（[^（）]*）/g, "")
+            .replace(/\([^()]*\)/g, "")
+            .replace(/[ \t]+\n/g, "\n")
+            .replace(/\n{3,}/g, "\n\n");
+        if (next === cleaned) break;
+        cleaned = next;
+    }
+    cleaned = cleaned.replace(/\n{3,}/g, "\n\n").trim();
     if (!picked && EMOJI_REQUEST_RE.test(String(userText ?? ""))) {
         const fallback = emojiFallbackCandidates(1)[0];
         if (fallback) picked = fallback.file;
@@ -4650,7 +4662,7 @@ const BEHAVIOR_FORMAT_RULES = "\n\n【行为与格式绝对准则】\n" +
     "1. 你拥有一个专属表情包库。使用表情包时，格式必须严格为 [表情:文件名]，文件名必须严格从【本回合可用表情包列表】中选取，每次最多选 1 个，没有合适的绝对不要强行发。\n" +
     "2. 必须选用标点符号（如 ~、！、？、...... 等）和 [表情:文件名] 中任一或任二来代替括号里的动作和心理描写。\n" +
     "3. 至于可爱的“♪”，絮想用的时候就可以自然用出来哦。\n" +
-    "4. 当主人明确要求你使用语音（比如“发语音”、“想听你的声音”等）时，请在句末加上 [语音] 标签。\n" +
+    "4. 当主人明确要求你使用语音（比如“发语音”、“想听你的声音”等）时，必须句末加上 [语音] 标签。\n" +
     "5. 绝对不要在你的回复里输出时间戳（形如 [20:28:22]、[11-18 20:28]、[2026-11-18 20:28:22]）。时间只作为你的背景常识，不是你要写出来的内容；也不要复述“当前时间”。\n\n" +
     "【时间逻辑与常识推理】\n" +
     "你的历史记录带有绝对时间戳，当前时间已知，但请把这些时间当做你的“潜意识背景常识”，不要刻意去计算或频繁报时。请利用时间差进行常识判断：\n" +
