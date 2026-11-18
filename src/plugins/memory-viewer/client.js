@@ -20,6 +20,11 @@ window.__ModuleLoader__.load({
       older: '加载更早的记录',
       updated: '更新于',
       count: '条对话',
+      imagePlaceholder: '[图片]',
+      audioPlaceholder: '[语音]',
+      emptyMessage: '[空消息]',
+      today: '今天',
+      yesterday: '昨天',
       empty: '记忆里还没有对话，先和絮说句话吧。',
       missing: '找不到 memory.json',
       failed: '读取失败',
@@ -42,6 +47,11 @@ window.__ModuleLoader__.load({
       older: 'Load older messages',
       updated: 'Updated',
       count: 'messages',
+      imagePlaceholder: '[Image]',
+      audioPlaceholder: '[Voice]',
+      emptyMessage: '[Empty message]',
+      today: 'Today',
+      yesterday: 'Yesterday',
       empty: 'Nothing remembered yet — say hello to Xu below.',
       missing: 'memory.json not found',
       failed: 'Could not read memory.json',
@@ -62,42 +72,6 @@ window.__ModuleLoader__.load({
       })
       if (!response.ok) throw new Error('HTTP ' + response.status)
       return response.json()
-    }
-
-    const RVC_VOICE = {
-      baseUrl: 'http://127.0.0.1:4892',
-      model: 'E:\\edge File\\download\\%E6%98%94%E6%B6%9F%20%281%29.pth',
-      index: '',
-      baseVoice: 'zh-CN-XiaoxuanNeural',
-      f0Method: 'rmvpe',
-      indexRate: 0,
-    }
-
-    async function speakText(text) {
-      const value = String(text || '').trim()
-      if (!value) return
-      try {
-        const response = await fetch('/dsh-tts-api/speak', {
-          method: 'POST',
-          headers: { 'content-type': 'application/json', accept: 'application/json' },
-          body: JSON.stringify({ text: value, provider: 'rvc', voice: RVC_VOICE.baseVoice, custom: RVC_VOICE }),
-          signal: AbortSignal.timeout(10000),
-        })
-        console.log('[memory-tts] speak status=' + response.status)
-        if (!response.ok) return
-        const data = await response.json().catch(() => null)
-        if (!data || typeof data.url !== 'string') return
-        const audio = new Audio(data.url)
-        try {
-          await audio.play()
-          console.log('[memory-tts] playing ' + data.url)
-        } catch (error) {
-          console.warn('[memory-tts] play blocked', error)
-          window.alert('语音已生成，但浏览器拦截了自动播放。请再点一次消息旁的 🔊 按钮。')
-        }
-      } catch (error) {
-        console.warn('[memory-tts] speak failed', error)
-      }
     }
 
     async function sendToPet(text, images = [], videos = []) {
@@ -172,6 +146,206 @@ window.__ModuleLoader__.load({
       } catch {
         return ''
       }
+    }
+
+    const TIME_PREFIX_RE = /^\[\d{2}-\d{2} \d{2}:\d{2}:\d{2}\]\s*/
+    const EMOJI_TAG_RE = /\[表情\s*[:：]\s*([^\]]+)\]/g
+    const TWO_HOURS = 2 * 60 * 60 * 1000
+
+    function timestampFromPrefix(value) {
+      const match = /^\[(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})\]/.exec(String(value || ''))
+      if (!match) return 0
+      const now = new Date()
+      let date = new Date(now.getFullYear(), Number(match[1]) - 1, Number(match[2]), Number(match[3]), Number(match[4]), Number(match[5]))
+      if (date.getTime() > now.getTime() + 24 * 60 * 60 * 1000) date.setFullYear(now.getFullYear() - 1)
+      return date.getTime()
+    }
+
+    function messageTimestamp(message) {
+      const raw = Number(message && message.ts)
+      if (Number.isFinite(raw) && raw > 0) return raw
+      return timestampFromPrefix(message && message.content)
+    }
+
+    function stripTimePrefix(value) {
+      return String(value || '').replace(TIME_PREFIX_RE, '')
+    }
+
+    function dayKey(ts) {
+      const date = new Date(ts)
+      if (Number.isNaN(date.getTime())) return ''
+      return date.getFullYear() + '-' + (date.getMonth() + 1) + '-' + date.getDate()
+    }
+
+    function formatDayLabel(ts) {
+      const date = new Date(ts)
+      const now = new Date()
+      if (date.getFullYear() === now.getFullYear()) return (date.getMonth() + 1) + '月' + date.getDate() + '日'
+      return date.getFullYear() + '年' + (date.getMonth() + 1) + '月' + date.getDate() + '日'
+    }
+
+    function formatClock(ts) {
+      const date = new Date(ts)
+      if (Number.isNaN(date.getTime())) return ''
+      return String(date.getHours()).padStart(2, '0') + ':' + String(date.getMinutes()).padStart(2, '0')
+    }
+
+    /** 把消息拍平成日期/时间/消息三种虚拟列表项。 */
+    function buildTimeline(messages) {
+      const items = []
+      let lastDay = ''
+      let lastTs = 0
+      messages.forEach((message, index) => {
+        const ts = messageTimestamp(message)
+        if (ts > 0) {
+          const day = dayKey(ts)
+          if (day && day !== lastDay) {
+            items.push({ type: 'day', key: 'day:' + day, ts, day })
+            lastDay = day
+            lastTs = 0
+          } else if (lastTs > 0 && ts - lastTs > TWO_HOURS) {
+            items.push({ type: 'time', key: 'time:' + day + ':' + ts, ts })
+          }
+        }
+        items.push({ type: 'message', key: 'message:' + index + ':' + (message.ts || ''), message, ts, index })
+        if (ts > 0) lastTs = ts
+      })
+      return items
+    }
+
+    function contentParts(value) {
+      const text = stripTimePrefix(textOf(value))
+      const parts = []
+      let cursor = 0
+      EMOJI_TAG_RE.lastIndex = 0
+      let match
+      while ((match = EMOJI_TAG_RE.exec(text)) !== null) {
+        if (match.index > cursor) parts.push({ type: 'text', text: text.slice(cursor, match.index) })
+        parts.push({ type: 'emoji', name: String(match[1] || '').trim(), raw: match[0] })
+        cursor = match.index + match[0].length
+      }
+      if (cursor < text.length) parts.push({ type: 'text', text: text.slice(cursor) })
+      return { text, parts }
+    }
+
+    function audioSourceOf(message) {
+      const candidates = [
+        message && message.audioUrl,
+        message && message.voiceUrl,
+        message && message.audio,
+        message && message.voice,
+        message && message.audioFile,
+        message && message.voiceFile,
+      ]
+      for (const candidate of candidates) {
+        if (typeof candidate === 'string' && candidate.trim()) return candidate.trim()
+        if (candidate && typeof candidate === 'object') {
+          const url = candidate.url || candidate.src || candidate.href
+          if (typeof url === 'string' && url.trim()) return url.trim()
+        }
+      }
+      return ''
+    }
+
+    function MessageAvatar({ role }) {
+      const isUser = role === 'user'
+      return h(
+        'div',
+        {
+          style: isUser ? S.avatarUser : S.avatarAssistant,
+          'aria-hidden': true,
+          title: isUser ? '你' : '絮',
+        },
+        isUser ? '你' : '絮',
+      )
+    }
+
+    function DayDivider({ ts, t }) {
+      const now = new Date()
+      const day = dayKey(ts)
+      const today = dayKey(now.getTime())
+      const yesterday = dayKey(now.getTime() - 24 * 60 * 60 * 1000)
+      const label = day === today ? t('today') : day === yesterday ? t('yesterday') : formatDayLabel(ts)
+      return h(
+        'div',
+        { style: S.dayDivider },
+        h('span', { style: S.dividerLine }),
+        h('span', { style: S.dayLabel }, label),
+        h('span', { style: S.dividerLine }),
+      )
+    }
+
+    function GapDivider({ ts }) {
+      return h(
+        'div',
+        { style: S.gapDivider },
+        h('span', { style: S.gapLabel }, formatClock(ts)),
+      )
+    }
+
+    function EmojiImage({ name, raw }) {
+      const [src, setSrc] = React.useState('')
+      const [failed, setFailed] = React.useState(false)
+      const [visible, setVisible] = React.useState(false)
+      const holderRef = React.useRef(null)
+
+      React.useEffect(() => {
+        setSrc('')
+        setFailed(false)
+        setVisible(false)
+      }, [name])
+
+      React.useEffect(() => {
+        const node = holderRef.current
+        if (!node || typeof IntersectionObserver === 'undefined') {
+          setVisible(true)
+          return () => {}
+        }
+        const observer = new IntersectionObserver(
+          (entries) => {
+            if (entries.some((entry) => entry.isIntersecting)) {
+              setVisible(true)
+              observer.disconnect()
+            }
+          },
+          { rootMargin: '240px' },
+        )
+        observer.observe(node)
+        return () => observer.disconnect()
+      }, [name])
+
+      React.useEffect(() => {
+        if (!visible || !name) return
+        setSrc('/dsh-pet-7340/emoji/' + encodeURIComponent(name))
+      }, [visible, name])
+
+      if (failed || !name) {
+        return h('span', { ref: holderRef, style: S.emojiFallback }, raw || ('[表情:' + name + ']'))
+      }
+      if (!src) {
+        return h('span', { ref: holderRef, style: S.emojiFallback, 'aria-hidden': true }, '…')
+      }
+      return h(
+        'span',
+        { ref: holderRef, style: S.emojiWrap },
+        h('img', {
+          src,
+          alt: raw || name,
+          loading: 'lazy',
+          onError: () => setFailed(true),
+          style: S.emojiImage,
+        }),
+      )
+    }
+
+    function MusicBar({ src }) {
+      if (!src) return null
+      return h('audio', {
+        controls: true,
+        preload: 'none',
+        src,
+        style: S.audio,
+      })
     }
 
     function textOf(value) {
@@ -308,63 +482,38 @@ window.__ModuleLoader__.load({
     function MessageRow({ t, message }) {
       const isUser = message.role === 'user'
       const isSystem = message.role === 'system'
-      const time = formatTime(message.ts)
       const images = Array.isArray(message.images) ? message.images.filter((image) => image && typeof image.file === 'string') : []
+      const audio = audioSourceOf(message)
+      const { parts } = contentParts(message.content)
+      const hasText = parts.some((part) => part.type === 'emoji' || String(part.text || '').trim() !== '')
+      const placeholder = hasText
+        ? ''
+        : images.length > 0
+          ? t('imagePlaceholder')
+          : audio
+            ? t('audioPlaceholder')
+            : t('emptyMessage')
       const sourceLabel = message.source === 'qq' ? 'QQ' : message.source === 'local' ? '本地' : ''
       return h(
         'div',
         {
-          style: {
-            display: 'flex',
-            justifyContent: isSystem ? 'center' : isUser ? 'flex-end' : 'flex-start',
-          },
+          style: isSystem ? S.systemRow : isUser ? S.userRow : S.assistantRow,
+          'data-role': message.role || 'assistant',
         },
+        !isSystem ? h(MessageAvatar, { role: message.role }) : null,
         h(
           'div',
-          { style: { maxWidth: isSystem ? '100%' : '82%', minWidth: 0 } },
+          { style: isSystem ? S.systemColumn : S.bubbleColumn },
           h(
             'div',
-            {
-              style: {
-                display: 'flex',
-                gap: 8,
-                alignItems: 'baseline',
-                justifyContent: isSystem ? 'center' : isUser ? 'flex-end' : 'flex-start',
-                marginBottom: 5,
-                fontSize: 11,
-                opacity: 0.55,
-              },
-            },
+            { style: isSystem ? S.systemMeta : isUser ? S.userMeta : S.assistantMeta },
             h('span', null, roleLabel(t, message.role)),
-            sourceLabel ? h('span', {
-              style: {
-                fontSize: 10,
-                padding: '1px 5px',
-                borderRadius: 6,
-                background: sourceLabel === 'QQ' ? 'rgba(59,130,246,0.18)' : 'rgba(236,72,153,0.16)',
-              },
-            }, sourceLabel) : null,
-            time ? h('span', null, time) : null,
-            !isUser && !isSystem && textOf(message.content).trim()
-              ? h('button', {
-                  type: 'button',
-                  title: '播放语音',
-                  'aria-label': '播放语音',
-                  onClick: (event) => {
-                    event.preventDefault()
-                    event.stopPropagation()
-                    void speakText(textOf(message.content))
-                  },
-                  style: {
-                    border: 0,
-                    background: 'transparent',
-                    cursor: 'pointer',
-                    padding: '0 2px',
-                    fontSize: 14,
-                    lineHeight: 1,
-                    opacity: 0.7,
-                  },
-                }, '🔊')
+            sourceLabel
+              ? h(
+                  'span',
+                  { style: sourceLabel === 'QQ' ? S.sourceQq : S.sourceLocal },
+                  sourceLabel,
+                )
               : null,
           ),
           h(
@@ -372,23 +521,139 @@ window.__ModuleLoader__.load({
             {
               style: {
                 ...S.bubble,
-                background: isSystem
-                  ? 'rgba(127,127,127,0.06)'
-                  : isUser
-                    ? 'rgba(59,130,246,0.13)'
-                    : 'rgba(127,127,127,0.10)',
-                borderColor: isSystem
-                  ? 'rgba(127,127,127,0.14)'
-                  : isUser
-                    ? 'rgba(59,130,246,0.24)'
-                    : 'rgba(127,127,127,0.19)',
+                ...(isSystem ? S.systemBubble : isUser ? S.userBubble : S.assistantBubble),
                 textAlign: isSystem ? 'center' : 'left',
               },
             },
             ...images.map((image, index) => h(ImageBubble, { key: index + ':' + image.file, image })),
-            (images.length > 0 && textOf(message.content) === '[图片]' ? null : textOf(message.content)),
+            audio ? h(MusicBar, { src: audio }) : null,
+            hasText
+              ? parts.map((part, index) =>
+                  part.type === 'emoji'
+                    ? h(EmojiImage, { key: 'emoji:' + index + ':' + part.name, name: part.name, raw: part.raw })
+                    : h('span', { key: 'text:' + index }, part.text),
+                )
+              : h('span', { style: S.emptyText }, placeholder),
           ),
         ),
+      )
+    }
+
+    function TimelineItem({ t, item }) {
+      if (item.type === 'day') return h(DayDivider, { ts: item.ts, t })
+      if (item.type === 'time') return h(GapDivider, { ts: item.ts })
+      return h(MessageRow, { t, message: item.message })
+    }
+
+    function MeasuredRow({ rowKey, onHeight, children }) {
+      const ref = React.useRef(null)
+      React.useLayoutEffect(() => {
+        const node = ref.current
+        if (!node) return
+        const report = () => onHeight(rowKey, node.getBoundingClientRect().height)
+        report()
+        if (typeof ResizeObserver === 'undefined') return () => {}
+        const observer = new ResizeObserver(report)
+        observer.observe(node)
+        return () => observer.disconnect()
+      }, [rowKey, onHeight])
+      return h('div', { ref, 'data-memory-row': rowKey, style: S.timelineRow }, children)
+    }
+
+    function estimateItemHeight(item) {
+      if (item.type === 'day') return 52
+      if (item.type === 'time') return 30
+      return 88
+    }
+
+    function lowerBound(offsets, value) {
+      let lo = 0
+      let hi = Math.max(0, offsets.length - 1)
+      while (lo < hi) {
+        const mid = Math.floor((lo + hi + 1) / 2)
+        if (offsets[mid] <= value) lo = mid
+        else hi = mid - 1
+      }
+      return lo
+    }
+
+    function VirtualTimeline({ t, items, scrollRef }) {
+      const [scrollTop, setScrollTop] = React.useState(0)
+      const [viewportHeight, setViewportHeight] = React.useState(600)
+      const [version, setVersion] = React.useState(0)
+      const listRef = React.useRef(null)
+      const heightsRef = React.useRef(new Map())
+      const rafRef = React.useRef(0)
+      const startRef = React.useRef(0)
+
+      React.useEffect(() => {
+        const element = scrollRef.current
+        if (!element) return
+        const onScroll = () => {
+          if (rafRef.current) return
+          rafRef.current = requestAnimationFrame(() => {
+            rafRef.current = 0
+            setScrollTop(element.scrollTop)
+          })
+        }
+        element.addEventListener('scroll', onScroll, { passive: true })
+        const observer = typeof ResizeObserver === 'undefined'
+          ? null
+          : new ResizeObserver(() => setViewportHeight(element.clientHeight))
+        if (observer) observer.observe(element)
+        setViewportHeight(element.clientHeight)
+        setScrollTop(element.scrollTop)
+        return () => {
+          element.removeEventListener('scroll', onScroll)
+          if (observer) observer.disconnect()
+          if (rafRef.current) cancelAnimationFrame(rafRef.current)
+        }
+      }, [scrollRef])
+
+      const onHeight = React.useCallback((key, height) => {
+        if (!height) return
+        const previous = heightsRef.current.get(key) || 0
+        if (Math.abs(previous - height) < 1) return
+        heightsRef.current.set(key, height)
+        if (previous > 0 && scrollRef.current) {
+          const index = items.findIndex((item) => item.key === key)
+          if (index >= 0 && index < startRef.current) {
+            scrollRef.current.scrollTop += height - previous
+          }
+        }
+        setVersion((value) => value + 1)
+      }, [items, scrollRef])
+
+      const offsets = React.useMemo(() => {
+        const next = [0]
+        for (const item of items) next.push(next[next.length - 1] + (heightsRef.current.get(item.key) || estimateItemHeight(item)))
+        return next
+      }, [items, version])
+
+      const listTop = listRef.current && scrollRef.current
+        ? listRef.current.getBoundingClientRect().top - scrollRef.current.getBoundingClientRect().top + scrollRef.current.scrollTop
+        : 0
+      const localScroll = Math.max(0, scrollTop - listTop)
+      const overscan = 8
+      const start = Math.max(0, lowerBound(offsets, localScroll) - overscan)
+      const end = Math.min(items.length, lowerBound(offsets, localScroll + viewportHeight) + overscan + 1)
+      startRef.current = start
+      const top = offsets[start] || 0
+      const bottom = Math.max(0, (offsets[items.length] || 0) - (offsets[end] || 0))
+      const visible = items.slice(start, end)
+
+      return h(
+        'div',
+        { ref: listRef, style: S.timeline },
+        h('div', { style: { height: top, flex: 'none' } }),
+        visible.map((item) =>
+          h(
+            MeasuredRow,
+            { key: item.key, rowKey: item.key, onHeight },
+            h(TimelineItem, { t, item }),
+          ),
+        ),
+        h('div', { style: { height: bottom, flex: 'none' } }),
       )
     }
 
@@ -445,7 +710,6 @@ window.__ModuleLoader__.load({
       const [pending, setPending] = React.useState(null)
       const [pendingImages, setPendingImages] = React.useState([])
       const [pendingVideos, setPendingVideos] = React.useState([])
-      const [visibleCount, setVisibleCount] = React.useState(10)
       const [sendError, setSendError] = React.useState(null)
       const alive = React.useRef(true)
       const sendingRef = React.useRef(false)
@@ -495,11 +759,7 @@ window.__ModuleLoader__.load({
 
       const payload = snapshot.payload
       const messages = React.useMemo(() => collectMessages(payload), [payload])
-      const visibleMessages = React.useMemo(
-        () => messages.slice(Math.max(0, messages.length - visibleCount)),
-        [messages, visibleCount],
-      )
-      const hasOlder = messages.length > visibleMessages.length
+      const timelineItems = React.useMemo(() => buildTimeline(messages), [messages])
       const ready = Boolean(payload && payload.ok)
       const stickRef = React.useRef(true)
 
@@ -660,19 +920,10 @@ window.__ModuleLoader__.load({
       } else {
         body = h(
           'div',
-          { style: S.list },
-          hasOlder
-            ? h(
-                'button',
-                {
-                  type: 'button',
-                  style: { ...S.button, alignSelf: 'center', marginBottom: 4 },
-                  onClick: () => setVisibleCount((value) => value + 20),
-                },
-                t('older'),
-              )
+          { style: S.timelineBody },
+          messages.length > 0
+            ? h(VirtualTimeline, { t, items: timelineItems, scrollRef })
             : null,
-          visibleMessages.map((message, index) => h(MessageRow, { key: index + ':' + (message.ts || ''), t, message })),
           pending ? h(MessageRow, { key: 'pending-user', t, message: pending }) : null,
           pending ? h(TypingRow, { key: 'pending-typing', t }) : null,
         )
@@ -887,15 +1138,79 @@ window.__ModuleLoader__.load({
         opacity: 0.55,
       },
       list: { display: 'flex', flexDirection: 'column', gap: 14, paddingBottom: 8 },
+      timelineBody: { paddingBottom: 8, minHeight: 0 },
+      timeline: { display: 'flex', flexDirection: 'column', width: '100%' },
+      timelineRow: { paddingBottom: 14, flex: 'none' },
+      systemRow: { display: 'flex', justifyContent: 'center', margin: '4px 0' },
+      userRow: { display: 'flex', flexDirection: 'row-reverse', justifyContent: 'flex-start', alignItems: 'flex-end', gap: 8, margin: '2px 0' },
+      assistantRow: { display: 'flex', justifyContent: 'flex-start', alignItems: 'flex-end', gap: 8, margin: '2px 0' },
+      systemColumn: { maxWidth: '100%', minWidth: 0 },
+      bubbleColumn: { maxWidth: '82%', minWidth: 0 },
+      avatarUser: {
+        flex: 'none',
+        width: 30,
+        height: 30,
+        borderRadius: '50%',
+        display: 'grid',
+        placeItems: 'center',
+        background: 'rgba(59,130,246,0.18)',
+        border: '1px solid rgba(59,130,246,0.28)',
+        color: 'inherit',
+        fontSize: 11,
+        fontWeight: 600,
+      },
+      avatarAssistant: {
+        flex: 'none',
+        width: 30,
+        height: 30,
+        borderRadius: '50%',
+        display: 'grid',
+        placeItems: 'center',
+        background: 'rgba(236,72,153,0.16)',
+        border: '1px solid rgba(236,72,153,0.24)',
+        color: 'inherit',
+        fontSize: 11,
+        fontWeight: 600,
+      },
+      userMeta: { display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: 6, marginBottom: 4, fontSize: 10.5, opacity: 0.55 },
+      assistantMeta: { display: 'flex', justifyContent: 'flex-start', alignItems: 'center', gap: 6, marginBottom: 4, fontSize: 10.5, opacity: 0.55 },
+      systemMeta: { display: 'flex', justifyContent: 'center', alignItems: 'center', gap: 6, marginBottom: 4, fontSize: 10.5, opacity: 0.55 },
+      sourceQq: { fontSize: 9.5, padding: '1px 5px', borderRadius: 6, background: 'rgba(59,130,246,0.16)' },
+      sourceLocal: { fontSize: 9.5, padding: '1px 5px', borderRadius: 6, background: 'rgba(236,72,153,0.14)' },
       bubble: {
         border: '1px solid transparent',
-        borderRadius: 13,
+        borderRadius: 15,
         padding: '10px 14px',
         fontSize: 'var(--dsh-content-font-size, 14px)',
         lineHeight: 1.7,
         whiteSpace: 'pre-wrap',
         overflowWrap: 'anywhere',
       },
+      userBubble: {
+        background: 'rgba(59,130,246,0.14)',
+        borderColor: 'rgba(59,130,246,0.24)',
+        borderBottomRightRadius: 5,
+      },
+      assistantBubble: {
+        background: 'rgba(236,72,153,0.09)',
+        borderColor: 'rgba(236,72,153,0.18)',
+        borderBottomLeftRadius: 5,
+      },
+      systemBubble: {
+        background: 'rgba(127,127,127,0.06)',
+        borderColor: 'rgba(127,127,127,0.14)',
+        color: 'inherit',
+      },
+      emptyText: { opacity: 0.62, fontStyle: 'italic' },
+      emojiWrap: { display: 'inline-block', verticalAlign: 'middle', margin: '2px 3px', lineHeight: 0 },
+      emojiImage: { display: 'block', width: 'auto', maxWidth: 140, maxHeight: 140, borderRadius: 10, objectFit: 'contain' },
+      emojiFallback: { display: 'inline', fontSize: '0.92em', opacity: 0.62 },
+      audio: { display: 'block', width: '100%', maxWidth: 280, height: 34, margin: '4px 0 6px', colorScheme: 'normal' },
+      dayDivider: { display: 'flex', alignItems: 'center', gap: 10, margin: '18px 0 12px', padding: '0 2px' },
+      dividerLine: { flex: 1, height: 1, background: 'rgba(127,127,127,0.16)' },
+      dayLabel: { flex: 'none', fontSize: 11, opacity: 0.58, letterSpacing: '0.02em' },
+      gapDivider: { display: 'flex', justifyContent: 'center', margin: '2px 0 10px' },
+      gapLabel: { fontSize: 10, opacity: 0.42, padding: '1px 8px', borderRadius: 8, background: 'rgba(127,127,127,0.06)' },
       notice: {
         marginTop: 28,
         padding: '22px 18px',

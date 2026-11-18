@@ -35,9 +35,11 @@ export class QqMemory {
     await this.load()
     const conversation = this.data.conversations[conversationId]
     const messages = Array.isArray(conversation?.messages) ? conversation.messages : []
-    return messages.slice(-Math.max(0, Number(limit) || 1000)).map((message) => ({
+    // 群聊/私聊历史严格累加，不做滑动窗口截断。
+    return messages.map((message) => ({
       role: message.role === 'assistant' ? 'assistant' : 'user',
       content: String(message.text ?? ''),
+      ts: Number(message.ts) || 0,
     })).filter((message) => message.content.trim() !== '')
   }
 
@@ -53,7 +55,7 @@ export class QqMemory {
     current.targetId = meta?.targetId ?? current.targetId
     current.updatedAt = Date.now()
     current.messages.push(entry)
-    if (current.messages.length > this.limit) current.messages.splice(0, current.messages.length - this.limit)
+    // 不再按 limit 裁剪；历史一旦写入就永久保留。
     await this.save()
   }
 

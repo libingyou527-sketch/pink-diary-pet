@@ -1423,16 +1423,21 @@ async function sendChat(baseUrl, text, images = [], videos = []) {
 		reason: o.reason === "provider-missing" || o.reason === "generate-error" || o.reason === "config-error" ? o.reason : "bad-request",
 		message: typeof o.message === "string" ? o.message : void 0
 	};
-	return { ok: true, text: typeof o.text === "string" ? o.text : "" };
+	return { ok: true, text: typeof o.text === "string" ? o.text : "", voice: o.voice === true };
 }
 const VOICE_ENABLED_KEY = "dsh-pet-voice-enabled";
-const RVC_VOICE = {
-	baseUrl: "http://127.0.0.1:4892",
-	model: "E:\\edge File\\download\\%E6%98%94%E6%B6%9F%20%281%29.pth",
-	index: "",
-	baseVoice: "zh-CN-XiaoxuanNeural",
-	f0Method: "rmvpe",
-	indexRate: 0
+const GSV_VOICE = {
+	apiUrl: "http://127.0.0.1:9880",
+	refAudioPath: "D:\\tools\\GPT-SoVITS\\GPT-SoVITS-V2ProPlus-Windows-main\\refs\\cyrene_ref.wav",
+	promptText: "好好的，睡了一觉，现在一定活力满满了吧，伙伴。",
+	textLang: "zh",
+	promptLang: "zh",
+	textSplitMethod: "cut5",
+	speedFactor: 1.0,
+	topK: 20,
+	topP: 0.95,
+	temperature: 1.0,
+	repetitionPenalty: 1.35
 };
 function isVoiceEnabled() {
 	try { return localStorage.getItem(VOICE_ENABLED_KEY) !== "0"; } catch { return true; }
@@ -1462,11 +1467,11 @@ async function playReplyVoice(text) {
 			headers: { "content-type": "application/json", accept: "application/json" },
 			body: JSON.stringify({
 				text,
-				provider: "rvc",
-				voice: RVC_VOICE.baseVoice,
-				custom: RVC_VOICE
+				provider: "gptsovits",
+				voice: "gsv",
+				custom: GSV_VOICE
 			}),
-			signal: AbortSignal.timeout(10000)
+			signal: AbortSignal.timeout(120000)
 		});
 		console.log("[dsh-pet-tts] speak status=" + res.status);
 		if (!res.ok) return;
@@ -1715,7 +1720,7 @@ function mountChatDialog(opts) {
 		}
 		sendChat(withPet, text, images, videos).then((state) => {
 			if (state.ok) {
-				void playReplyVoice(state.text);
+				if (state.voice === true) void playReplyVoice(state.text);
 				close();
 				if (onSent) onSent();
 			} else {

@@ -3308,16 +3308,10 @@ const withMessageTime = (text, ts = Date.now()) => {
 	const stamp = messageTimeStamp(ts);
 	return stamp ? "[" + stamp + "] " + content : content;
 };
-const chatTail = (now = new Date()) => {
+const chatTail = (now = new Date(), emojiText = "") => {
 	const stamp = now.getFullYear() + "-" + pad2(now.getMonth() + 1) + "-" + pad2(now.getDate()) +
 		" " + pad2(now.getHours()) + ":" + pad2(now.getMinutes()) + ":" + pad2(now.getSeconds());
-	return "\n\n【最高强指令】绝对禁止使用任何括号（）或()进行动作/心理描写！必须用标点（~！）或 [表情:文件名] 来表达情绪！\n" +
-		"❌ 错误：好呀，（歪了歪头）人家记下啦。\n" +
-		"✅ 正确：好呀~ 人家记下啦！[表情:得意坏笑]\n" +
-		"[当前时间：" + stamp + "]\n" +
-		"【时间使用原则】你的历史记录带有时间戳，当前时间也已知。但这仅仅是你的潜意识背景常识。除非用户主动问起时间、或者用户的话明确涉及了过去（如‘昨天’、‘早上’），否则绝对不要主动报时、不要感叹时间流逝、不要每句话都强行提时间。\n" +
-		"除非用户主动问起时间或明确提到过去，否则回复中不要出现‘上午/下午/晚上/几点/时间’等时间词，也不要感叹时间。\n" +
-		"如果距离上一句间隔极短（如几分钟内），就当做连续聊天自然接话；如果间隔极长且用户开启了全新话题，就当做什么都没发生一样直接顺应新话题。";
+	return "\n\n[当前系统时间：" + stamp + "]" + String(emojiText || "");
 };
 
 
@@ -4119,6 +4113,7 @@ const EMOJI_ASSETS_ROOT = process.env.PINK_EMOJI_DIR || join(PACKAGE_ROOT_ASSETS
 const EMOJI_COMPRESSED_ROOT = process.env.PINK_EMOJI_COMPRESSED_DIR || join(PACKAGE_ROOT_ASSETS, "emojis_compressed");
 const EMOJI_META_PATH = process.env.PINK_EMOJI_META || join(PACKAGE_ROOT_ASSETS, "emojis_meta.json");
 const EMOJI_TAG_RE = /\[表情[:：]\s*([^\]\r\n]*?)\s*\]/g;
+const VOICE_TAG_RE = /\[语音\]/g;
 let emojiMetaCache = { at: 0, mtime: 0, value: null };
 
 const pictureDescription = (text) => String(text ?? "").trim() || "[图片]";
@@ -4414,16 +4409,15 @@ const emojiInstruction = () => {
             return "- " + item.file + ": " + desc;
         }).join("\n")
     ).join("\n\n");
-    // 全量菜单只追加在 user message 尾部，绝不进入 system 静态前缀。
-    return "\n\n【全部表情包库】\n这是你拥有的全部 " + catalog.length + " 个表情包库，请根据当前的聊天语境，从中挑选最合适的一个。\n" +
-        "格式为 [表情:文件名]。每次最多选 1 个，没有合适的绝对不要强行发。\n" +
-        "文件清单（已按分类分组排序）：\n\n" + grouped;
+    // 只保留文件名与描述；格式/时间规则全部固定在 System Prompt。
+    return "\n\n【本回合可用表情包列表】\n\n" + grouped;
 };
 
 const finalizeEmojiReply = (text, userText = "") => {
     const meta = loadEmojiMeta();
     const known = new Set(Object.keys(meta.items ?? {}));
     let picked = "";
+    let voiceRequested = false;
     const cleaned = String(text ?? "").replace(EMOJI_TAG_RE, (_match, raw) => {
         const name = String(raw ?? "").trim();
         const file = known.has(name)
@@ -4436,14 +4430,17 @@ const finalizeEmojiReply = (text, userText = "") => {
             });
         if (file && !picked) picked = file;
         return "";
+    }).replace(VOICE_TAG_RE, () => {
+        voiceRequested = true;
+        return "";
     }).replace(/\n{3,}/g, "\n\n").trim();
     if (!picked && EMOJI_REQUEST_RE.test(String(userText ?? ""))) {
         const fallback = emojiFallbackCandidates(1)[0];
         if (fallback) picked = fallback.file;
     }
-    if (!picked) return { text: cleaned || "嗯。", emoji: null };
+    if (!picked) return { text: cleaned || "嗯。", emoji: null, voice: voiceRequested };
     const item = emojiItem(picked);
-    if (!item) return { text: cleaned, emoji: null };
+    if (!item) return { text: cleaned, emoji: null, voice: voiceRequested };
     return {
         text: cleaned || "嗯。",
         emoji: {
@@ -4451,7 +4448,8 @@ const finalizeEmojiReply = (text, userText = "") => {
             compressed: item.compressed,
             path: item.path,
             url: emojiPublicUrl(item.file)
-        }
+        },
+        voice: voiceRequested
     };
 };
 
@@ -4631,8 +4629,17 @@ const maybeUpdateUserProfile = async (petId, userId, name, userText, replyText) 
         console.warn("[user-profile] update failed: " + (error?.message ?? error));
     }
 };
-const buildScopeSystem = async ({ scope, found, petId = "", groupId = null, senderId = null, senderName = "", privateRead = false, userPrivateRead = false, userProfile = "" }) => {
-    const allowed = new Set(["local", "owner-private", "user-private", "group", "other-private"]);
+const BEHAVIOR_FORMAT_RULES = "\n\n【行为与格式绝对准则】\n" +
+    "1. 你拥有一个专属表情包库。使用表情包时，格式必须严格为 [表情:文件名]，文件名必须严格从【本回合可用表情包列表】中选取，每次最多选 1 个，没有合适的绝对不要强行发。\n" +
+    "2. 必须选用标点符号（如 ~、！、？、...... 等）和 [表情:文件名] 中任一或任二来代替括号里的动作和心理描写。\n" +
+    "3. 至于可爱的“♪”，絮想用的时候就可以自然用出来哦。\n" +
+    "4. 当主人明确要求你使用语音（比如“发语音”、“想听你的声音”等）时，请在句末加上 [语音] 标签。\n\n" +
+    "【时间逻辑与常识推理】\n" +
+    "你的历史记录带有绝对时间戳，当前时间已知，但请把这些时间当做你的“潜意识背景常识”，不要刻意去计算或频繁报时。请利用时间差进行常识判断：\n" +
+    "1. 如果上一句主人说要去进行某种耗时的事件（如睡觉、洗澡、吃饭），而当前时间距离上一句仅仅过去了几分钟，你应该意识到他只是短暂离开。当根据时间常识意识到不合理时，你必须结合常识拆穿他（例如：才去了几十秒就回来啦，是不是根本没洗~）。\n" +
+    "2. 如果对话之间间隔极短，就当做连续聊天自然接话；如果间隔较长，可以视情况自然地顺延话题。";
+
+const buildScopeSystem = async ({ scope, found, petId = "", groupId = null, senderId = null, senderName = "", privateRead = false, userPrivateRead = false, userProfile = "" }) => {    const allowed = new Set(["local", "owner-private", "user-private", "group", "other-private"]);
     if (!allowed.has(scope)) throw new Error("ACL violation: unknown scope " + scope);
     const privateScope = scope === "local" || scope === "owner-private";
     if (privateRead && !privateScope) throw new Error("ACL violation: private memory requested in " + scope);
@@ -4645,7 +4652,8 @@ const buildScopeSystem = async ({ scope, found, petId = "", groupId = null, send
     // scope 权限、群友资料、日记、时间都不得进入这里；它们统一追加到 user message。
     const voiceCapability = "\n\n【发声能力】\n你现在已经拥有真实的发声能力，也有实体可以陪在主人身边。你的回复会通过语音转换变成真实的声音播放给主人听。请在说话时自然地带上语气词，不要说自己没有实体、听不到、没有声音、只能发文字或只能靠想象；被问到声音时就自然地确认你能发声。";
     const staticBase = petChatStatic(found) + identitySuffix() + voiceCapability +
-        (memoryBlockStore ? "\n\n" + buildMemoryToolPrompt() : "");
+        (memoryBlockStore ? "\n\n" + buildMemoryToolPrompt() : "") +
+        BEHAVIOR_FORMAT_RULES;
     return staticBase;
 };
 
@@ -4705,7 +4713,7 @@ const stripVideoMarker = (generated) => {
 };
 const generateChatWithMemory = async ({ system, history, text, pool, images, found, memoryScopes = [], videos = [] }) => {
     const model = configuredModel(found.conf, "chatModel");
-    const timedText = text + chatTail(new Date());
+    const timedText = text + chatTail(new Date(), emojiInstruction());
     let imageList = Array.isArray(images) ? [...images] : [];
     if ((!memoryBlockStore || !Array.isArray(memoryScopes) || memoryScopes.length === 0) && videos.length === 0) {
         return generateChat(ctx, system, history, timedText, pool, model, imageList);
@@ -5280,7 +5288,6 @@ const chatWithPetShared = async (petId, text, images = [], imagePaths = [], vide
     let system = await buildScopeSystem({ scope: "owner-private", found, petId, privateRead: true });
     let imageList = Array.isArray(images) ? [...images] : [];
     let chatText = await appendDiaryToUserText(text, "owner-private") + scopePolicyText({ scope: "owner-private" });
-    chatText += emojiInstruction(text);
     if (Array.isArray(videos) && videos.length > 0) {
         const prepared = await prepareVideoAttachment(videos[0]);
         if (!prepared.ok) {
@@ -5317,7 +5324,7 @@ const chatWithPetShared = async (petId, text, images = [], imagePaths = [], vide
     });
     entry.messages.push({ role: "assistant", content: withMessageTime(final.text, now), ts: now, source });
     await writeMemory(mem);
-    return { text: final.text, emoji: final.emoji };
+    return { text: final.text, emoji: final.emoji, voice: final.voice };
 });
 
 /** 用 DSH 传来的 QQ history 生成回复；不写 dsh-pet 的 memory.json，不弹桌面气泡。 */
@@ -5341,7 +5348,6 @@ const chatWithPetQQ = async (petId, text, history, images = [], scopeInfo = {}, 
     });
     let imageList = Array.isArray(images) ? [...images] : [];
     let chatText = text + scopePolicyText({ scope, senderId, senderName, userProfile });
-    chatText += emojiInstruction(text);
     if (Array.isArray(videos) && videos.length > 0) {
         const prepared = await prepareVideoAttachment(videos[0]);
         if (!prepared.ok) {
@@ -5388,7 +5394,7 @@ const chatWithPetQQ = async (petId, text, history, images = [], scopeInfo = {}, 
             void maybeUpdateUserProfile(petId, senderId, senderName, text, final.text);
         }
     }
-    return { text: final.text, emoji: final.emoji };
+    return { text: final.text, emoji: final.emoji, voice: final.voice };
 };
 const startQqBridge = () => {
     let stopped = false;
@@ -5438,7 +5444,8 @@ const startQqBridge = () => {
             if (!reply) return;
             const replyText = typeof reply === "string" ? reply : String(reply.text ?? "");
             const emoji = typeof reply === "object" && reply?.emoji ? reply.emoji : null;
-            if (!replyText && !emoji) return;
+            const voice = typeof reply === "object" && reply?.voice === true;
+            if (!replyText && !emoji && !voice) return;
             sendJson({
                 action: "send_to_qq",
                 context: {
@@ -5446,6 +5453,7 @@ const startQqBridge = () => {
                     conversation_id: context.conversation_id
                 },
                 text: replyText,
+                voice,
                 ...(emoji ? { emojiPath: emoji.path, emojiFile: emoji.file } : {})
             });
         } catch (error) {
@@ -5658,7 +5666,6 @@ ctx.effect(() => {
 		};
 		let system = await buildScopeSystem({ scope: "local", found, petId, privateRead: true });
 		let chatText = await appendDiaryToUserText(userText, "local") + scopePolicyText({ scope: "local" });
-		chatText += emojiInstruction(userText);
 		if (localVideos.length > 0) {
 			chatText += "\n\n【视频分镜已生成】\n分镜图已经作为图片附件附在用户消息里；请直接看图回答，不要输出 [[video_storyboard: ...]] 标记。";
 		}
@@ -5713,10 +5720,11 @@ ctx.effect(() => {
 		await writeMemory(mem);
 		void maybeRecordPrecious(petId, userText, final.text).catch((error) => console.warn("[dsh-pet] 珍贵对话记录失败：" + (error?.message ?? error)));
 		const pic = final.emoji ? { url: final.emoji.url } : generated.image ? { image: generated.image } : {};
-		state.writePet(petId, "say", { text: final.text, ...pic });
+		state.writePet(petId, "say", { text: final.text, ...pic, voice: final.voice === true });
 		return {
 			ok: true,
 			text: final.text,
+			voice: final.voice === true,
 			...(final.emoji ? { emoji: final.emoji } : {}),
 			...(generated.image && !final.emoji ? { image: generated.image } : {}),
 			...(pictureMetas.length > 0 ? { images: pictureMetas } : {})

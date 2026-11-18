@@ -9,6 +9,7 @@ import { PetBridge } from "../pet-bridge/server.js";
 import { QqMemory } from "../pet-bridge/memory.js";
 import { processInboundImage } from "../pet-bridge/image.js";
 import { appendFileSync, existsSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
+import { execFile } from "node:child_process";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { QuestionChannel } from "../features/question-channel.js";
@@ -41,14 +42,101 @@ function dispatchInteraction(event, manager) {
         return manager.approvalChannel?.handleInteraction(event) ?? false;
     return false;
 }
-function readRvcSettings() {
+/** GPT-SoVITS 语音配置（独立于已废弃的 ChatTTS/RVC 管线）。 */
+function readGsvSettings() {
     try {
-        const file = join(homedir(), ".dsh", "tts-rvc", "settings.json");
+        const file = join(homedir(), ".dsh", "tts-gsv", "settings.json");
         const data = JSON.parse(readFileSync(file, "utf8"));
-        return data && data.rvc && typeof data.rvc === "object" ? data.rvc : {};
+        return data && typeof data === "object" ? data : {};
     } catch {
         return {};
     }
+}
+
+/** GPT-SoVITS 端口可能调整；运行时探测 /tts 路由并缓存，避免写死端口。 */
+const GSV_ROUTE = "/tts";
+const GSV_DEFAULT_API = "http://127.0.0.1:9880";
+const GSV_DEFAULT_PORTS = [9880, 9881, 9882, 9883];
+let gsvBaseCache = null;
+
+function invalidateGsvBase() {
+    gsvBaseCache = null;
+}
+
+/** 列出本机 LISTEN 端口，区分“本进程 PID 持有”和“全部”（netstat 失败时返回空）。 */
+function localListeningPorts(pid) {
+    return new Promise((resolve) => {
+        try {
+            execFile("netstat", ["-ano", "-p", "tcp"], { windowsHide: true, timeout: 4000 }, (error, stdout) => {
+                const own = [];
+                const all = [];
+                const text = String(stdout || "");
+                if (text) {
+                    for (const line of text.split(/\r?\n/)) {
+                        const m = line.trim().match(/^TCP\s+\S+:(\d+)\s+\S+\s+LISTENING\s+(\d+)$/i);
+                        if (!m) continue;
+                        const port = Number(m[1]);
+                        const owner = Number(m[2]);
+                        if (!port) continue;
+                        if (!all.includes(port)) all.push(port);
+                        if (owner === pid && !own.includes(port)) own.push(port);
+                    }
+                }
+                if (error) console.debug?.("[pet] netstat failed: " + (error?.message ?? error));
+                resolve({ own, all });
+            });
+        } catch {
+            resolve({ own: [], all: [] });
+        }
+    });
+}
+
+/** 探测某个 base 是否挂着 GPT-SoVITS 的 /tts 路由：404=不是它，其余（405/400）=路由存在。 */
+async function isGsvBase(base) {
+    try {
+        const response = await fetch(base + GSV_ROUTE, {
+            method: "GET",
+            redirect: "manual",
+            signal: AbortSignal.timeout(1500)
+        });
+        return !(response.status === 404 || response.status === 426 || response.status === 502 || response.status === 503);
+    } catch {
+        return false;
+    }
+}
+
+/**
+ * 解析当前 GPT-SoVITS 的 API base。
+ * 顺序：环境变量 > tts-gsv 配置 > 常见端口 > 本进程监听端口 > 全部本地监听端口 > 默认值。
+ * 结果按进程生命周期缓存；调用失败时清缓存重探一次。
+ */
+async function resolveGsvBase(settings, logger) {
+    if (gsvBaseCache) return gsvBaseCache;
+    const envBase = String(process.env.DSH_GSV_API_URL || "").trim().replace(/\/+$/, "");
+    if (envBase) {
+        gsvBaseCache = envBase;
+        return gsvBaseCache;
+    }
+    const candidates = [];
+    const push = (value) => {
+        const base = String(value || "").trim().replace(/\/+$/, "");
+        if (base && !candidates.includes(base)) candidates.push(base);
+    };
+    push(settings?.apiUrl);
+    for (const port of GSV_DEFAULT_PORTS) push("http://127.0.0.1:" + port);
+    const { own, all } = await localListeningPorts(process.pid);
+    for (const port of own) push("http://127.0.0.1:" + port);
+    for (const port of all) push("http://127.0.0.1:" + port);
+    for (const base of candidates) {
+        if (await isGsvBase(base)) {
+            gsvBaseCache = base;
+            logger?.debug?.("[pet] gsv api resolved: " + base);
+            return base;
+        }
+    }
+    const fallback = String(settings?.apiUrl || GSV_DEFAULT_API).replace(/\/+$/, "");
+    logger?.warn?.("[pet] gsv api not resolved, fallback to " + fallback);
+    return fallback;
 }
 
 function wavDurationSeconds(buffer) {
@@ -65,49 +153,72 @@ function wavDurationSeconds(buffer) {
     }
 }
 
-async function synthesizePetVoice(text, config, logger) {
-    const api = String(config.ttsApiUrl || process.env.DSH_TTS_API_URL || "http://127.0.0.1:51904").replace(/\/+$/, "");
-    const rvc = readRvcSettings();
-    if (!rvc.model) return null;
-    let response;
-    try {
-        response = await fetch(api + "/dsh-tts-api/speak", {
-            method: "POST",
-            headers: { "content-type": "application/json", accept: "application/json" },
-            body: JSON.stringify({
-                text,
-                provider: "rvc",
-                voice: rvc.baseVoice || "zh-CN-XiaoxuanNeural",
-                custom: {
-                    baseUrl: rvc.baseUrl || "http://127.0.0.1:4892",
-                    model: rvc.model,
-                    index: rvc.index || "",
-                    baseVoice: rvc.baseVoice || "zh-CN-XiaoxuanNeural",
-                    f0Method: "rmvpe",
-                    indexRate: 0,
-                    f0UpKey: 0,
-                    resampleSr: 40000,
-                    rmsMixRate: 0.25,
-                    protect: 0.33,
-                    filterRadius: 3
-                }
-            }),
-            signal: AbortSignal.timeout(10000)
-        });
-    } catch (error) {
-        logger?.debug?.("[pet] voice synth skipped: " + (error?.message ?? error));
+/** 只保留要念的文字：剥离 [表情:xxx] 与 [语音] 标签（这两类标签永不进 TTS）。 */
+function stripSpeechTags(value) {
+    return String(value ?? "")
+        .replace(/\[表情[:：][^\]]*\]/g, " ")
+        .replace(/\[语音\]/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+}
+
+async function synthesizePetVoice(text, config, logger, signal) {
+    const settings = readGsvSettings();
+    const spoken = stripSpeechTags(text);
+    if (!spoken) return null;
+    const refAudio = String(settings.refAudioPath || "").trim();
+    if (!refAudio) {
+        logger?.warn?.("[pet] gsv ref audio not configured");
         return null;
     }
-    if (!response.ok) return null;
-    const data = await response.json().catch(() => null);
-    const url = data && typeof data.url === "string" ? data.url : "";
-    if (!url) return null;
+    const payload = JSON.stringify({
+        text: spoken,
+        text_lang: settings.textLang || "zh",
+        ref_audio_path: refAudio,
+        prompt_lang: settings.promptLang || "zh",
+        prompt_text: String(settings.promptText || ""),
+        text_split_method: settings.textSplitMethod || "cut5",
+        media_type: "wav",
+        streaming_mode: false,
+        speed_factor: Number.isFinite(Number(settings.speedFactor)) ? Number(settings.speedFactor) : 1.0,
+        top_k: Number.isFinite(Number(settings.topK)) ? Number(settings.topK) : 20,
+        top_p: Number.isFinite(Number(settings.topP)) ? Number(settings.topP) : 0.95,
+        temperature: Number.isFinite(Number(settings.temperature)) ? Number(settings.temperature) : 1.0,
+        repetition_penalty: Number.isFinite(Number(settings.repetitionPenalty)) ? Number(settings.repetitionPenalty) : 1.35,
+        seed: Number.isFinite(Number(settings.seed)) ? Number(settings.seed) : -1
+    });
+    const postTts = (base) => fetch(base + GSV_ROUTE, {
+        method: "POST",
+        headers: { "content-type": "application/json", accept: "audio/wav" },
+        body: payload,
+        signal: signal || AbortSignal.timeout(120000)
+    });
+    let api = await resolveGsvBase(settings, logger);
+    let response;
     try {
-        const audioResponse = await fetch(/^https?:\/\//i.test(url) ? url : api + url, {
-            signal: AbortSignal.timeout(10000)
-        });
-        if (!audioResponse.ok) return null;
-        const buffer = Buffer.from(await audioResponse.arrayBuffer());
+        response = await postTts(api);
+    } catch (error) {
+        // 端口可能变了：清缓存重新探测一次再重试。
+        invalidateGsvBase();
+        const retried = await resolveGsvBase(settings, logger);
+        if (retried === api) {
+            logger?.debug?.("[pet] voice synth skipped: " + (error?.message ?? error));
+            return null;
+        }
+        api = retried;
+        try {
+            response = await postTts(api);
+        } catch (error2) {
+            logger?.debug?.("[pet] voice synth skipped: " + (error2?.message ?? error2));
+            return null;
+        }
+    }
+    if (!response.ok) {
+        logger?.debug?.("[pet] gsv synth http " + response.status);
+        return null;
+    }
+    try {
+        const buffer = Buffer.from(await response.arrayBuffer());
         if (buffer.length < 44) return null;
         if (wavDurationSeconds(buffer) > 60) return null;
         const file = join(tmpdir(), "dsh-pet-voice-" + Date.now() + "-" + Math.random().toString(36).slice(2, 8) + ".wav");
@@ -119,17 +230,30 @@ async function synthesizePetVoice(text, config, logger) {
     }
 }
 
-async function maybeSendPetVoice(bot, target, text, config, limiter, logger) {
-    if (!text || !String(text).trim()) return;
-    const file = await synthesizePetVoice(String(text), config, logger);
-    if (!file) return;
+function stripQqTimestamp(value) {
+    return String(value ?? "")
+        .replace(/\[\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\]\s*/g, "")
+        .trim();
+}
+
+async function maybeSendPetVoice(bot, target, text, config, limiter, logger, timeoutMs = 120000) {    if (!text || !String(text).trim()) return false;
+    let file = null;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(new Error("voice-first timeout")), Math.max(1000, Number(timeoutMs) || 20000));
     try {
+        file = await synthesizePetVoice(String(text), config, logger, controller.signal);
+        if (!file) return false;
         await bot.sendVoice(resolveReplyTarget(target, limiter, false), { localPath: file });
-        logger?.debug?.("[pet] voice sent");
+        logger?.debug?.("[pet] voice-first sent; text suppressed");
+        return true;
     } catch (error) {
-        logger?.warn?.("[pet] voice send failed: " + (error?.message ?? error));
+        logger?.warn?.("[pet] voice-first failed, falling back to text: " + (error?.message ?? error));
+        return false;
     } finally {
-        try { unlinkSync(file); } catch {}
+        clearTimeout(timer);
+        if (file) {
+            try { unlinkSync(file); } catch {}
+        }
     }
 }
 export async function bootstrapGateway(ctx, agents, config, logger) {
@@ -167,7 +291,24 @@ export async function bootstrapGateway(ctx, agents, config, logger) {
             portCount: 10,
             discoveryPath: join(qqDir, "pet-bridge.json"),
             logger,
-            sendReply: async (target, text, emojiPath) => {
+            sendReply: async (target, text, emojiPath, voice) => {
+                text = stripQqTimestamp(text);
+                if (voice === true) {
+                    const voiceTimeout = Number(config.voiceFirstTimeoutMs) || 120000;
+                    const voiceSent = await maybeSendPetVoice(bot, target, text, config, petReplyLimiter, logger, voiceTimeout);
+                    if (voiceSent) {
+                        // 私聊保留表情图；群聊成功时只发语音。
+                        if (target.scope !== "group" && emojiPath && existsSync(emojiPath)) {
+                            try {
+                                await bot.sendImage(resolveReplyTarget(target, petReplyLimiter, false), { localPath: emojiPath });
+                                logger?.debug?.("[pet] emoji image sent after voice: " + emojiPath);
+                            } catch (error) {
+                                logger?.warn?.("[pet] emoji image send failed: " + (error?.message ?? error));
+                            }
+                        }
+                        return;
+                    }
+                }
                 const chunks = chunkMarkdownText(text, Number(config.textChunkLimit) || 4500);
                 for (const chunk of chunks) {
                     await sendResolvedMarkdown(bot, resolveReplyTarget(target, petReplyLimiter, true), chunk);
@@ -180,12 +321,11 @@ export async function bootstrapGateway(ctx, agents, config, logger) {
                         logger?.warn?.("[pet] emoji image send failed: " + (error?.message ?? error));
                     }
                 }
-                void maybeSendPetVoice(bot, target, text, config, petReplyLimiter, logger);
             },
             onSent: async (context, text) => {
                 await petMemory.append(context.conversation_id, {
                     role: "assistant",
-                    text,
+                    text: stripQqTimestamp(text),
                     message_id: context.message_id,
                     ts: Date.now()
                 }, { scope: context.scope, targetId: context.target_id });
