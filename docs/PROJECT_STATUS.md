@@ -1166,3 +1166,46 @@ chat 写记忆        memory.json 288503 -> 289302 字节，落在 xilian/pet/  
 
 日记插件的路由是 `GET /xu-diary/entries`、`/xu-diary/health`，
 裸路径 `/xu-diary` 返回它自己的 404 —— 这是设计如此，不是故障。
+
+---
+
+## 22. 2026-11-18 20:03 · 重启验证：全部代码项已生效
+
+### 22.1 启动（junction 布局下）
+
+```text
+boot.js -> impl imported ok -> 7 个服务全 ok -> apply ok
+electron 4 进程，20:00:05 启动
+menu: registered「语音服务」
+already listening on 9880, skip spawn     ← 服务本来就在跑，幂等分支正确
+```
+
+### 22.2 接口与数据
+
+```text
+GET  /dsh-tts-api/gsv-status     200
+     trimIdleMinutes=5  idleStopMinutes=20  startWaitSeconds=75
+GET  /dsh-pet-memory             200    （junction 布局下读 xilian/pet/memory.json）
+GET  /xu-diary/entries           200    （21 条）
+state.sections.menu.data.items   语音服务 / 恢复语音、释放显存
+```
+
+### 22.3 内存修剪实测（临时把 trimIdleMinutes 改成 1 验证）
+
+```text
+修剪前工作集   3713 MB
+看门狗日志     12:01:05  trim working set pid=5424 exit=0
+修剪后工作集      4 MB
+修剪后首次合成  HTTP 200 / 5.18s（平时 3.5s，多 1.6s 换入）
+合成后工作集     736 MB
+恢复配置       trimIdleMinutes = 5
+```
+
+### 22.4 结论
+
+```text
+功能和内存策略的代码项全部生效，无待验证项。
+剩下的只有两件人侧确认：
+  1. 桌宠窗口/QQ 里实际听到语音（服务端已验证，播放端未由我确认）
+  2. 连续运行 2-3 天的稳定性观察
+```
