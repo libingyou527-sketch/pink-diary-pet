@@ -4115,6 +4115,12 @@ const EMOJI_COMPRESSED_ROOT = process.env.PINK_EMOJI_COMPRESSED_DIR || join(PACK
 const EMOJI_META_PATH = process.env.PINK_EMOJI_META || join(PACKAGE_ROOT_ASSETS, "emojis_meta.json");
 const EMOJI_TAG_RE = /\[表情[:：]\s*([^\]\r\n]*?)\s*\]/g;
 const VOICE_TAG_RE = /\[语音\]/g;
+/**
+ * 用户明确要求语音时的兜底判定：模型经常忘记输出 [语音] 标签（实测同为"发个语音"
+ * 的请求，本地复现 voice=false），所以这里用关键词直接判，保证 QQ / 网页都能发声。
+ * 只在"明确要求"时命中，符合既定策略（没被要求就不发语音）。
+ */
+const VOICE_REQUEST_RE = /(?:发|来|给|说|录|整)(?:个|一个|一条|一段|下)?\s*(?:语音|音频|声音)|(?:用|靠)\s*语音|语音(?:说|回|来|给我)|想?听(?:听)?(?:你|你?的)\s*声音/;
 let emojiMetaCache = { at: 0, mtime: 0, value: null };
 
 const pictureDescription = (text) => String(text ?? "").trim() || "[图片]";
@@ -4418,7 +4424,7 @@ const finalizeEmojiReply = (text, userText = "") => {
     const meta = loadEmojiMeta();
     const known = new Set(Object.keys(meta.items ?? {}));
     let picked = "";
-    let voiceRequested = false;
+    let voiceRequested = VOICE_REQUEST_RE.test(String(userText ?? ""));
     const cleanedRaw = String(text ?? "").replace(EMOJI_TAG_RE, (_match, raw) => {
         const name = String(raw ?? "").trim();
         const file = known.has(name)
