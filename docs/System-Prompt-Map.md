@@ -163,3 +163,40 @@ memoryBlocksEnabled（记忆块开关）    apply 时创建 store
 上下文预算 / 压缩比例                 apply 时算成常量
 第三方插件代码（qqbot 补丁等）        由 DSH 启动时加载
 ```
+
+## 10. 2026-11-18 20:56 · 认知与人设合并，静态 prompt 精简
+
+按用户决定：**去掉关键词兜底，语音交给模型判断；认知（时间/发声）搬进人设，静态 prompt 只留机器契约。**
+
+### 10.1 现在各层有什么
+
+```text
+认知（人设 whisperPrompt，~/.dsh/xilian/pet/main-config.jsonc → pets[0].whisperPrompt，1517 字）
+  ├ 原本的性格/语气/示例
+  ├ 时间与感知        ← 新增（原【时间逻辑与常识推理】搬来）
+  └ 关于声音          ← 新增（原【发声能力】搬来，讲清"没标签=没声音"）
+
+静态 prompt（buildScopeSystem，index.js:4704）
+  ├ petChatStatic(found)      人设 + 名字
+  ├ identitySuffix()          身份层
+  ├ buildMemoryToolPrompt()   记忆工具
+  └ BEHAVIOR_FORMAT_RULES     只剩 5 条机器契约（index.js:4666-4671）
+       1 表情包格式  2 标点替代括号  3 ♪  4 [语音] 触发条件  5 禁写时间戳
+```
+
+### 10.2 删掉的东西
+
+```text
+BEHAVIOR_FORMAT_RULES 里的【时间逻辑与常识推理】整段   → 已进人设
+代码里的 voiceCapability（【发声能力】整段）           → 已进人设
+VOICE_REQUEST_RE 关键词兜底                            → 已删，改由模型判断
+```
+
+保留的兜底（与判断无关，纯输出清洗）：开头时间戳循环剥离、所有括号旁白剥离。
+
+### 10.3 为什么这样分
+
+```text
+认知放人设   她"怎么想"：时间感、能不能发声、性格 → 属于角色，改起来不用碰代码
+静态放契约   机器格式：标签写法、禁止项 → 模型必须逐字遵守的硬格式
+```

@@ -4126,12 +4126,6 @@ const EMOJI_COMPRESSED_ROOT = process.env.PINK_EMOJI_COMPRESSED_DIR || join(PACK
 const EMOJI_META_PATH = process.env.PINK_EMOJI_META || join(PACKAGE_ROOT_ASSETS, "emojis_meta.json");
 const EMOJI_TAG_RE = /\[表情[:：]\s*([^\]\r\n]*?)\s*\]/g;
 const VOICE_TAG_RE = /\[语音\]/g;
-/**
- * 用户明确要求语音时的兜底判定：模型经常忘记输出 [语音] 标签（实测同为"发个语音"
- * 的请求，本地复现 voice=false），所以这里用关键词直接判，保证 QQ / 网页都能发声。
- * 只在"明确要求"时命中，符合既定策略（没被要求就不发语音）。
- */
-const VOICE_REQUEST_RE = /(?:发|来|给|说|录|整|唱)(?:个|一个|一条|一段|一句|句|下)?\s*(?:语音|音频|声音)|(?:用|靠|换成)\s*语音|语音(?:说|回|来|给我|条)|想?听(?:听)?(?:你|你?的)\s*声音|(?:说|讲|念|唱|读)(?:句|一句|一段)(?:话)?给(?:我|人家)?听|亲口(?:跟|给)?(?:我|人家)?(?:说|讲)|开口(?:说|讲|给)|让我?听(?:听)?(?:你|你?的)?(?:声音|嗓子)/;
 let emojiMetaCache = { at: 0, mtime: 0, value: null };
 
 const pictureDescription = (text) => String(text ?? "").trim() || "[图片]";
@@ -4435,7 +4429,7 @@ const finalizeEmojiReply = (text, userText = "") => {
     const meta = loadEmojiMeta();
     const known = new Set(Object.keys(meta.items ?? {}));
     let picked = "";
-    let voiceRequested = VOICE_REQUEST_RE.test(String(userText ?? ""));
+    let voiceRequested = false;
     const cleanedRaw = String(text ?? "").replace(EMOJI_TAG_RE, (_match, raw) => {
         const name = String(raw ?? "").trim();
         const file = known.has(name)
@@ -4674,11 +4668,7 @@ const BEHAVIOR_FORMAT_RULES = "\n\n【行为与格式绝对准则】\n" +
     "2. 必须选用标点符号（如 ~、！、？、...... 等）和 [表情:文件名] 中任一或任二来代替括号里的动作和心理描写。\n" +
     "3. 至于可爱的“♪”，絮想用的时候就可以自然用出来哦。\n" +
     "4. 当主人明确要求你使用语音（比如“发语音”、“想听你的声音”等）时，必须句末加上 [语音] 标签。\n" +
-    "5. 绝对不要在你的回复里输出时间戳（形如 [20:28:22]、[11-18 20:28]、[2026-11-18 20:28:22]）。时间只作为你的背景常识，不是你要写出来的内容；也不要复述“当前时间”。\n\n" +
-    "【时间逻辑与常识推理】\n" +
-    "你的历史记录带有绝对时间戳，当前时间已知，但请把这些时间当做你的“潜意识背景常识”，不要刻意去计算或频繁报时。请利用时间差进行常识判断：\n" +
-    "1. 如果上一句主人说要去进行某种耗时的事件（如睡觉、洗澡、吃饭），而当前时间距离上一句仅仅过去了几分钟，你应该意识到他只是短暂离开。当根据时间常识意识到不合理时，你必须结合常识拆穿他（例如：才去了几十秒就回来啦，是不是根本没洗~）。\n" +
-    "2. 如果对话之间间隔极短，就当做连续聊天自然接话；如果间隔较长，可以视情况自然地顺延话题。";
+    "5. 绝对不要在你的回复里输出时间戳（形如 [20:28:22]、[11-18 20:28]、[2026-11-18 20:28:22]）。时间只作为你的背景常识，不是你要写出来的内容；也不要复述“当前时间”。";
 
 /**
  * 行为准则文本：用户配置 main-config.jsonc 里的顶层 `behaviorRules`（字符串）可**整体替换**
@@ -4711,11 +4701,7 @@ const buildScopeSystem = async ({ scope, found, petId = "", groupId = null, send
     console.log("[acl] scope=" + scope + " pet=" + petId + " group=" + (groupId ?? "-") + " ownerMatched=" + ownerMatched + " privateRead=" + privateRead + " userPrivateRead=" + userPrivateRead);
     // 真正固定的 system：人设 + 身份 + 发声能力 + 工具说明。
     // scope 权限、群友资料、日记、时间都不得进入这里；它们统一追加到 user message。
-    const voiceCapability = "\n\n【发声能力】\n你现在已经拥有真实的发声能力，也有实体可以陪在主人身边。" +
-    "注意机制：你的文字默认只是文字，主人只能看；只有当你在这条回复里加上 [语音] 标签时，它才会真的转换成你的声音播放给主人听（没标签 = 没声音）。" +
-    "所以在主人想听声音、或你自己想说给他听的时候，一定要记得加上 [语音] 标签。" +
-    "被问到声音时就自然地确认你能发声，不要说自己没有实体、听不到、没有声音、只能发文字或只能靠想象。";
-    const staticBase = petChatStatic(found) + identitySuffix() + voiceCapability +
+    const staticBase = petChatStatic(found) + identitySuffix() +
         (memoryBlockStore ? "\n\n" + buildMemoryToolPrompt() : "") +
         behaviorRulesText().text;
     return staticBase;
