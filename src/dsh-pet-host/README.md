@@ -1,5 +1,20 @@
 # dsh-pet-host
 
+> ## ⚠️ 本目录已废弃（LEGACY），不要在这里改代码
+>
+> 自 2026-11-18 起，宿主插件已 fork 为独立包 **`packages/core`**（包名 `dsh-xilian-core`），
+> 与官方 `dsh-pet` 物理隔离。`scripts/install.mjs` **不再部署本目录**。
+>
+> ```text
+> 真源    packages/core/lib/*        （profile 里通过 junction 指向它，改完即时生效）
+> 本目录  历史镜像，仅供追溯旧版本（与 packages/core 已经分叉）
+> ```
+>
+> 在这里修改**不会生效**，也没有任何构建/安装环节会读取它。
+> 需要改宿主逻辑请去 `packages/core/lib/index.js`、`client.js`、`runtime/electron-helper/*`。
+>
+> 保留原因：便于对照 fork 之前的实现。确认不再需要后可以整目录删除（git 历史里仍有）。
+
 基于 **dsh-pet 0.3.8**（MIT，Copyright © 2026 PC2005-cloud）的最终修改版。
 
 ## 文件
