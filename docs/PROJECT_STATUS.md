@@ -1209,3 +1209,66 @@ state.sections.menu.data.items   语音服务 / 恢复语音、释放显存
   1. 桌宠窗口/QQ 里实际听到语音（服务端已验证，播放端未由我确认）
   2. 连续运行 2-3 天的稳定性观察
 ```
+
+---
+
+## 23. 2026-11-18 21:23 · QQ 语音修好：根因是 `♪` 撞上 GBK
+
+### 23.1 结论先行
+
+QQ 语音一直不出声，**不是标签、不是认知、不是网络**，而是：
+
+```text
+api_v2.py 合成前会 print() 目标文本
+Windows 上 python 的 stdout 默认是 GBK
+文本里出现 ♪（U+266A）→ UnicodeEncodeError → 接口 400/500
+```
+
+这个人设几乎每句都以 ♪ 结尾，所以失败率接近 100%。
+
+### 23.2 定位过程（值得记下来）
+
+```text
+① 怀疑模型不打标签 → 直接采样：9/10 voice=true，标签没问题（推翻猜想）
+② 关键反证：记忆里"200 条 0 标签"是无效证据
+   —— 记忆存的是剥离标签后的文本，标签永远不可能出现在那里
+③ 加纯文本诊断（~/.dsh/qqbot/voice.log，不做任何匹配判断），一条 QQ 消息即定位：
+     synth begin textLen=61 hostOrigin=http://127.0.0.1:56911
+     host speak http=502
+     direct fallback textLen=61
+     direct fallback response=400
+④ 用失败原文逐项复现：
+     含 ♪ 的原文                      -> 400
+     去 ♪ 同长度文本                  -> 200 / 858KB
+     「你好呀♪」                      -> 400
+     「你好呀♪」+ UTF-8 环境          -> 200
+```
+
+服务端异常原文：`'gbk' codec can't encode character '\u266a' in position 60`。
+日志里"实际输入的目标文本:"为空，就是 print 打到一半就死了。
+
+### 23.3 修复
+
+```text
+插件 spawn（lib/index.js ensureGsvRunning）
+  env: PYTHONIOENCODING=utf-8 / PYTHONUTF8=1 / PYTHONLEGACYWINDOWSSTDIO=0
+tools/gpt-sovits/start.ps1  同样三行
+```
+
+验证：宿主路由 + 「好呀，那就再试一次——絮在这儿呢♪」
+→ HTTP 200 / 6.5s / 377KB；QQ 端用户确认"通了"。
+
+### 23.4 教训
+
+```text
+· 不能拿"存储后的文本"当作"模型原始输出"的证据——中间有剥离/清洗
+· 单点传输测试要覆盖真实文本特征（这个角色的 ♪ 就是特征）
+· 跨语言进程（Node → Python）的编码假设必须显式声明，不能依赖系统默认
+```
+
+### 23.5 遗留
+
+```text
+~/.dsh/qqbot/voice.log   纯文本诊断日志，每次语音 1-4 行
+                          定位已完成，可删可留（待用户决定）
+```
