@@ -6026,7 +6026,7 @@ function makeFactory() {
 //#endregion
 //#region src/client/index.ts
 window.__ModuleLoader__.load({
-	id: "dsh-pet",
+	id: "dsh-xilian-core",
 	factory: makeFactory()
 });
 

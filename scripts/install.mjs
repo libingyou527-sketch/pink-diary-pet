@@ -98,11 +98,28 @@ const runtimeConfig = {
     memoryBlocksFile: join(memoryDir, "context-blocks.json")
 };
 const runtimeConfigFile = join(memoryDir, "pink-diary-pet.json");
+const forceConfig = args.includes("--force-config");
 if (!dryRun) {
     mkdirSync(memoryDir, { recursive: true });
     mkdirSync(diaryDir, { recursive: true });
     mkdirSync(pictureDir, { recursive: true });
-    writeFileSync(runtimeConfigFile, JSON.stringify(runtimeConfig, null, 2) + "\n", "utf8");
+    // 绝不覆盖用户已设置的运行时配置：
+    // 默认值只用于"补缺"，已有键（日记目录 / owner / 记忆块 / 视频分镜…）一律保留。
+    // 需要强行重置时显式传 --force-config。
+    let previous = {};
+    if (existsSync(runtimeConfigFile) && !forceConfig) {
+        try {
+            previous = JSON.parse(readFileSync(runtimeConfigFile, "utf8")) || {};
+        } catch {
+            console.warn("existing config is not valid JSON, will be preserved under .broken");
+        }
+    }
+    const merged = { ...runtimeConfig, ...previous };
+    writeFileSync(runtimeConfigFile, JSON.stringify(merged, null, 2) + "\n", "utf8");
+    const kept = Object.keys(previous).filter((k) => !(k in runtimeConfig));
+    console.log("runtime config: " + (forceConfig ? "reset" : "merged") +
+        " (" + Object.keys(merged).length + " keys" +
+        (kept.length ? ", kept " + kept.length + " extra: " + kept.join(",") : "") + ")");
     const identityFile = join(memoryDir, "identity.json");
     if (!existsSync(identityFile)) {
         const example = JSON.parse(readFileSync(join(root, "config", "identity.example.json"), "utf8"));
