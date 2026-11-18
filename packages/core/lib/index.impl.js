@@ -7591,6 +7591,99 @@ if (rest === "diary") {
 		}
 	}), "dsh-xilian-core: /dsh-tts-api/gsv-status");
 	void ensureGsvRunning();
+	const runCmd = (file, args) => new Promise((done) => {
+		let finished = false;
+		const finish = (result) => {
+			if (finished) return;
+			finished = true;
+			done(result);
+		};
+		try {
+			const child = spawn(file, args, { windowsHide: true });
+			let out = "";
+			let err = "";
+			child.stdout?.on("data", (chunk) => { out += chunk; });
+			child.stderr?.on("data", (chunk) => { err += chunk; });
+			child.on("error", (error) => finish({ code: -1, out, err: String(error?.message ?? error) }));
+			child.on("close", (code) => finish({ code, out, err }));
+		} catch (error) {
+			finish({ code: -1, out: "", err: String(error?.message ?? error) });
+		}
+	});
+	const findPidByPort = async (port) => {
+		if (process.platform === "win32") {
+			const result = await runCmd("netstat", ["-ano", "-p", "tcp"]);
+			for (const line of String(result.out || "").split(/\r?\n/)) {
+				const m = line.trim().match(/^TCP\s+\S+:(\d+)\s+\S+\s+LISTENING\s+(\d+)$/i);
+				if (m && Number(m[1]) === port) return Number(m[2]);
+			}
+			return 0;
+		}
+		const result = await runCmd("lsof", ["-nP", "-iTCP:" + port, "-sTCP:LISTEN", "-t"]);
+		const pid = Number(String(result.out || "").trim().split(/\s+/)[0]);
+		return Number.isFinite(pid) && pid > 0 ? pid : 0;
+	};
+	const describePid = async (pid) => {
+		if (process.platform === "win32") {
+			const result = await runCmd("tasklist", ["/FI", "PID eq " + pid, "/FO", "CSV", "/NH"]);
+			const first = String(result.out || "").trim().split(/\r?\n/)[0] || "";
+			const name = String(first.split(",")[0] || "").replace(/^"|"$/g, "");
+			return name;
+		}
+		const result = await runCmd("ps", ["-p", String(pid), "-o", "comm="]);
+		return String(result.out || "").trim();
+	};
+	const stopGsv = async () => {
+		const port = numOr(readGsvLauncher().port, 9880);
+		const pid = await findPidByPort(port);
+		if (!pid) {
+			gsvState.listening = false;
+			gsvState.reason = "not listening";
+			appendGsvLog("stop requested: nothing listening on " + port);
+			return { ok: true, stopped: false, reason: "not-listening", port };
+		}
+		const name = (await describePid(pid)).toLowerCase();
+		// 安全阀：端口可能被别的进程占用，确认是 python 再动手
+		if (name && !name.includes("python")) {
+			appendGsvLog("stop aborted: pid " + pid + " is '" + name + "', not python");
+			return { ok: false, stopped: false, reason: "not-python", pid, processName: name, port };
+		}
+		appendGsvLog("stop requested: killing pid " + pid + " (" + (name || "unknown") + ") on " + port);
+		if (process.platform === "win32") {
+			await runCmd("taskkill", ["/PID", String(pid), "/F"]);
+		} else {
+			try { process.kill(pid, "SIGTERM"); } catch {}
+		}
+		for (let i = 0; i < 20; i += 1) {
+			await new Promise((resolveWait) => setTimeout(resolveWait, 250));
+			if (!(await probeTcp(port))) {
+				gsvState.listening = false;
+				gsvState.reason = "stopped";
+				gsvState.childPid = 0;
+				appendGsvLog("stopped pid " + pid + ", port " + port + " closed");
+				return { ok: true, stopped: true, pid, processName: name, port };
+			}
+		}
+		gsvState.lastError = "port " + port + " still listening after kill";
+		appendGsvLog(gsvState.lastError);
+		return { ok: false, stopped: false, reason: "still-listening", pid, port };
+	};
+	ctx.effect(() => ctx.webServer.register({
+		kind: "exact",
+		path: "/dsh-tts-api/gsv-stop",
+		handler: async (req, res) => {
+			if (req.method !== "POST") {
+				sendJson(res, 405, { ok: false, error: "use POST" });
+				return;
+			}
+			try {
+				const result = await stopGsv();
+				sendJson(res, result.ok ? 200 : 500, result);
+			} catch (error) {
+				sendJson(res, 500, { ok: false, error: String(error?.message ?? error) });
+			}
+		}
+	}), "dsh-xilian-core: /dsh-tts-api/gsv-stop");
 	ctx.effect(() => ctx.webServer.register({
 		kind: "prefix",
 		path: ROUTE_PREFIX,
