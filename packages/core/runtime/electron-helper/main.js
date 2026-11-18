@@ -61,7 +61,7 @@ const {
 } = require('./topmost-watchdog.js');
 // 宿主存活判定（issue #56：宿主退出 → 管道断开 → 自己退，绝不弹框、绝不留僵尸）
 const { HOST_POLL_MS, hostIsGone, isBrokenPipeError, parseHostPid } = require('./host-liveness.js');
-const STARTUP_LOG = path.join(process.env.USERPROFILE || require('node:os').homedir(), ".dsh", "dsh-pet", "startup.log");
+const STARTUP_LOG = path.join(process.env.USERPROFILE || require('node:os').homedir(), ".dsh", "xilian", "pet", "startup.log");
 const STARTUP_T0 = Date.now();
 const startupLog = (line) => {
   try {
