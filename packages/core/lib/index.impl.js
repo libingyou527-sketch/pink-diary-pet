@@ -7360,6 +7360,126 @@ if (rest === "diary") {
 			contentType: MIME[servedExt] ?? "application/octet-stream"
 		};
 	};
+	// ---- GPT-SoVITS 语音（并入自 @memef1f1y/dsh-plugin-tts 的 gptsovits provider）----
+	// 客户端契约不变：POST /dsh-tts-api/speak { text, provider, custom } -> { url }
+	// 禁用第三方 TTS 插件后，桌宠语音路径保持原样。
+	const TTS_AUDIO_PREFIX = "/dsh-tts-audio";
+	const ttsFiles = new Map();
+	const TTS_TAG_EMOJI = /\[表情[:：][^\]]*\]/g;
+	const TTS_TAG_VOICE = /\[语音\]/g;
+	const stripSpeakTags = (value) => String(value ?? "").replace(TTS_TAG_EMOJI, " ").replace(TTS_TAG_VOICE, " ").replace(/\s+/g, " ").trim();
+	const readGsvSettings = () => {
+		try {
+			return JSON.parse(readFileSync(join(resolveDshHome(), "tts-gsv", "settings.json"), "utf8")) || {};
+		} catch {
+			return {};
+		}
+	};
+	const numOr = (value, fallback) => {
+		const n = Number(value);
+		return Number.isFinite(n) ? n : fallback;
+	};
+	const synthesizeGsv = async (payload) => {
+		const base = readGsvSettings();
+		const custom = payload?.custom && typeof payload.custom === "object" ? payload.custom : {};
+		const cfg = { ...base, ...custom };
+		const apiUrl = String(cfg.apiUrl || "http://127.0.0.1:9880").replace(/\/+$/, "");
+		const refAudio = String(cfg.refAudioPath || "").trim();
+		if (!refAudio) throw new Error("未配置 GPT-SoVITS 参考音频（refAudioPath）");
+		const spoken = stripSpeakTags(payload?.text);
+		if (!spoken) throw new Error("剥离标签后没有可朗读文本");
+		const body = JSON.stringify({
+			text: spoken,
+			text_lang: String(cfg.textLang || "zh"),
+			ref_audio_path: refAudio,
+			prompt_lang: String(cfg.promptLang || "zh"),
+			prompt_text: String(cfg.promptText || ""),
+			text_split_method: String(cfg.textSplitMethod || "cut5"),
+			media_type: "wav",
+			streaming_mode: false,
+			speed_factor: numOr(cfg.speedFactor, 1.0),
+			top_k: numOr(cfg.topK, 20),
+			top_p: numOr(cfg.topP, 0.95),
+			temperature: numOr(cfg.temperature, 1.0),
+			repetition_penalty: numOr(cfg.repetitionPenalty, 1.35),
+			seed: numOr(cfg.seed, -1)
+		});
+		let response;
+		try {
+			response = await fetch(apiUrl + "/tts", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body,
+				signal: AbortSignal.timeout(120000)
+			});
+		} catch (error) {
+			throw new Error("无法连接 GPT-SoVITS（" + apiUrl + "）：" + String(error?.message ?? error));
+		}
+		if (!response.ok) throw new Error("GPT-SoVITS 合成失败（HTTP " + response.status + "）");
+		const buffer = Buffer.from(await response.arrayBuffer());
+		if (buffer.length < 44) throw new Error("GPT-SoVITS 返回的音频为空");
+		const dir = join(resolveDshHome(), "xilian-tts");
+		mkdirSync(dir, { recursive: true });
+		const id = "a" + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+		const file = join(dir, id + ".wav");
+		writeFileSync(file, buffer);
+		ttsFiles.set(id, { file, at: Date.now() });
+		while (ttsFiles.size > 80) {
+			const oldest = ttsFiles.keys().next().value;
+			ttsFiles.delete(oldest);
+		}
+		return { url: TTS_AUDIO_PREFIX + "/" + id };
+	};
+	const registerTtsRoutes = () => {
+	ctx.effect(() => ctx.webServer.register({
+		kind: "exact",
+		path: "/dsh-tts-api/speak",
+		handler: async (req, res) => {
+			if (req.method !== "POST") {
+				sendJson(res, 405, { error: "method not allowed" });
+				return;
+			}
+			try {
+				const raw = await readBody(req);
+				let payload = {};
+				try {
+					payload = JSON.parse(raw || "{}") || {};
+				} catch {
+					sendJson(res, 400, { error: "invalid JSON body" });
+					return;
+				}
+				const text = String(payload?.text ?? "").trim();
+				if (!text) {
+					sendJson(res, 400, { error: "empty text" });
+					return;
+				}
+				const out = await synthesizeGsv(payload);
+				sendJson(res, 200, { url: out.url });
+			} catch (error) {
+				sendJson(res, 502, { error: String(error?.message ?? error) });
+			}
+		}
+	}), "dsh-xilian-core: /dsh-tts-api/speak");
+	ctx.effect(() => ctx.webServer.register({
+		kind: "prefix",
+		path: TTS_AUDIO_PREFIX,
+		handler: async (req, res) => {
+			const id = decodeURIComponent(String(req.url ?? "").split("?")[0]).slice(TTS_AUDIO_PREFIX.length + 1);
+			const hit = ttsFiles.get(id);
+			if (!hit || !existsSync(hit.file)) {
+				res.statusCode = 404;
+				res.end("not found");
+				return;
+			}
+			sendFile(res, hit.file, "audio/wav");
+		}
+	}), "dsh-xilian-core: /dsh-tts-audio");
+	};
+	try {
+		registerTtsRoutes();
+	} catch (error) {
+		console.warn("[xilian] TTS 路由注册失败（语音将不可用）：" + String(error?.message ?? error));
+	}
 	ctx.effect(() => ctx.webServer.register({
 		kind: "prefix",
 		path: ROUTE_PREFIX,
