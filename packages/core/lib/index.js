@@ -4124,20 +4124,6 @@ const MEDIA_ID_RE = /^[0-9A-Za-z._-]+\.(?:webp|jpe?g|png)$/i;
 const EMOJI_ASSETS_ROOT = process.env.PINK_EMOJI_DIR || join(PACKAGE_ROOT_ASSETS, "emojis");
 const EMOJI_COMPRESSED_ROOT = process.env.PINK_EMOJI_COMPRESSED_DIR || join(PACKAGE_ROOT_ASSETS, "emojis_compressed");
 const EMOJI_META_PATH = process.env.PINK_EMOJI_META || join(PACKAGE_ROOT_ASSETS, "emojis_meta.json");
-/**
- * 语音标签诊断：把"模型输出里出现 语音/发声 字样"的原始文本记到固定文件。
- * 用途：区分"她根本没输出标签"与"输出了非标准形式（【语音】/（语音）/［语音］）但没被识别"。
- * 只记尾部 160 字，避免日志膨胀。
- */
-const debugVoiceRaw = (raw) => {
-    try {
-        const text = String(raw ?? "");
-        if (!/[语發发]音|发声|语音/.test(text)) return;
-        const file = join(resolveDshHome(), "xilian-tts", "voice-debug.log");
-        mkdirSync(dirname(file), { recursive: true });
-        appendFileSync(file, new Date().toISOString() + " raw=" + JSON.stringify(text.slice(-160)) + "\n");
-    } catch {}
-};
 const EMOJI_TAG_RE = /\[表情[:：]\s*([^\]\r\n]*?)\s*\]/g;
 const VOICE_TAG_RE = /\[语音\]/g;
 let emojiMetaCache = { at: 0, mtime: 0, value: null };
@@ -4440,7 +4426,6 @@ const emojiInstruction = () => {
 };
 
 const finalizeEmojiReply = (text, userText = "") => {
-    debugVoiceRaw(text);
     const meta = loadEmojiMeta();
     const known = new Set(Object.keys(meta.items ?? {}));
     let picked = "";
