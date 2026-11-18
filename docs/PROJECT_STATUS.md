@@ -1111,3 +1111,58 @@ DSH 升级 0.2.1-rc.3 -> 新版
 lib/index.js 模块化
       结论：不做。拆分破坏与上游的一一对应，upstream-diff 已够用
 ```
+
+---
+
+## 21. 2026-11-18 20:05 · 数据目录迁移（移动 + junction 兜底）
+
+### 21.1 为什么做
+
+fork 之后数据还挂在官方包名 `~/.dsh/dsh-pet` 下，容易误以为是官方插件的数据；
+tts 相关的三个目录（tts-gsv / xilian-tts / tts-rvc）也散着，备份时容易漏。
+
+### 21.2 迁移后的结构
+
+```text
+~/.dsh/xilian/            ← 唯一数据根
+├── pet/                  原 dsh-pet（配置/记忆/图片/动画/日志）
+├── tts/
+│   ├── settings.json     原 tts-gsv
+│   └── audio/            原 xilian-tts（wav + 日志）
+└── legacy/               归档：tts-rvc、dafeiyu-screensense、11 个 .bak（584 KB）
+
+~/.dsh/qqbot/             保持不动（第三方 qqbot 插件自己算的路径）
+```
+
+### 21.3 junction 兜底（关键设计）
+
+```text
+~/.dsh/dsh-pet     -> xilian/pet
+~/.dsh/tts-gsv     -> xilian/tts
+~/.dsh/xilian-tts  -> xilian/tts/audio
+```
+
+跑着的插件和两个 UI 插件仍按旧路径读，junction 让它们零改动继续工作；
+真实数据已经在 `xilian/` 下。这样迁移窗口为零，出问题把 junction 换个方向即可回滚。
+
+### 21.4 迁移后实测
+
+```text
+chat 写记忆        memory.json 288503 -> 289302 字节，落在 xilian/pet/        ✓
+记忆插件           GET /dsh-pet-memory  200，size 一致                        ✓
+日记插件           GET /xu-diary/entries 200，21 条                            ✓
+语音合成           2.4s，音频落在 xilian/tts/audio/                            ✓
+旧路径             三者均 LinkType=Junction，未重建实体目录                     ✓
+```
+
+### 21.5 后续
+
+旧路径仍可正常访问。等代码里的路径全部改到 `xilian/`（清单见 `docs/Data-Layout.md` §5）
+并验证通过后，再用 `rmdir` 删 junction（不是 `rd /s`，避免连目标一起删）。
+
+`~/.dsh/qqbot/` 保持原样：那是第三方插件的路径，改了会在下次 `npm update` 失效。
+
+### 21.6 顺带发现（非本次迁移造成）
+
+日记插件的路由是 `GET /xu-diary/entries`、`/xu-diary/health`，
+裸路径 `/xu-diary` 返回它自己的 404 —— 这是设计如此，不是故障。
