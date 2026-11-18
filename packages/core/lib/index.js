@@ -4455,18 +4455,6 @@ const finalizeEmojiReply = (text, userText = "") => {
         if (next === cleaned) break;
         cleaned = next;
     }
-    cleaned = cleaned.trim();
-    // 去掉所有括号旁白（动作/心理/舞台提示）：全角（）与半角() 都剥，最多两轮以处理相邻情况。
-    // 表情包标签用的是 [表情:xxx]，方括号不受影响。
-    for (let guard = 0; guard < 2; guard += 1) {
-        const next = cleaned
-            .replace(/（[^（）]*）/g, "")
-            .replace(/\([^()]*\)/g, "")
-            .replace(/[ \t]+\n/g, "\n")
-            .replace(/\n{3,}/g, "\n\n");
-        if (next === cleaned) break;
-        cleaned = next;
-    }
     cleaned = cleaned.replace(/\n{3,}/g, "\n\n").trim();
     if (!picked && EMOJI_REQUEST_RE.test(String(userText ?? ""))) {
         const fallback = emojiFallbackCandidates(1)[0];
