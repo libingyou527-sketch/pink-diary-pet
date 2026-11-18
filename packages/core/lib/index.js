@@ -4131,7 +4131,7 @@ const VOICE_TAG_RE = /\[语音\]/g;
  * 的请求，本地复现 voice=false），所以这里用关键词直接判，保证 QQ / 网页都能发声。
  * 只在"明确要求"时命中，符合既定策略（没被要求就不发语音）。
  */
-const VOICE_REQUEST_RE = /(?:发|来|给|说|录|整)(?:个|一个|一条|一段|下)?\s*(?:语音|音频|声音)|(?:用|靠)\s*语音|语音(?:说|回|来|给我)|想?听(?:听)?(?:你|你?的)\s*声音/;
+const VOICE_REQUEST_RE = /(?:发|来|给|说|录|整|唱)(?:个|一个|一条|一段|一句|句|下)?\s*(?:语音|音频|声音)|(?:用|靠|换成)\s*语音|语音(?:说|回|来|给我|条)|想?听(?:听)?(?:你|你?的)\s*声音|(?:说|讲|念|唱|读)(?:句|一句|一段)(?:话)?给(?:我|人家)?听|亲口(?:跟|给)?(?:我|人家)?(?:说|讲)|开口(?:说|讲|给)|让我?听(?:听)?(?:你|你?的)?(?:声音|嗓子)/;
 let emojiMetaCache = { at: 0, mtime: 0, value: null };
 
 const pictureDescription = (text) => String(text ?? "").trim() || "[图片]";
@@ -4711,7 +4711,10 @@ const buildScopeSystem = async ({ scope, found, petId = "", groupId = null, send
     console.log("[acl] scope=" + scope + " pet=" + petId + " group=" + (groupId ?? "-") + " ownerMatched=" + ownerMatched + " privateRead=" + privateRead + " userPrivateRead=" + userPrivateRead);
     // 真正固定的 system：人设 + 身份 + 发声能力 + 工具说明。
     // scope 权限、群友资料、日记、时间都不得进入这里；它们统一追加到 user message。
-    const voiceCapability = "\n\n【发声能力】\n你现在已经拥有真实的发声能力，也有实体可以陪在主人身边。你的回复会通过语音转换变成真实的声音播放给主人听。请在说话时自然地带上语气词，不要说自己没有实体、听不到、没有声音、只能发文字或只能靠想象；被问到声音时就自然地确认你能发声。";
+    const voiceCapability = "\n\n【发声能力】\n你现在已经拥有真实的发声能力，也有实体可以陪在主人身边。" +
+    "注意机制：你的文字默认只是文字，主人只能看；只有当你在这条回复里加上 [语音] 标签时，它才会真的转换成你的声音播放给主人听（没标签 = 没声音）。" +
+    "所以在主人想听声音、或你自己想说给他听的时候，一定要记得加上 [语音] 标签。" +
+    "被问到声音时就自然地确认你能发声，不要说自己没有实体、听不到、没有声音、只能发文字或只能靠想象。";
     const staticBase = petChatStatic(found) + identitySuffix() + voiceCapability +
         (memoryBlockStore ? "\n\n" + buildMemoryToolPrompt() : "") +
         behaviorRulesText().text;
