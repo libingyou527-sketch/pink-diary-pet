@@ -8005,6 +8005,191 @@ if (rest === "diary") {
 			} catch {}
 		};
 	}, "dsh-xilian-core: 语音服务菜单");
+	// ---- F3.6：记忆查看 / 粉色日记的路由收编到 core（原在两个 UI 插件里）----
+	// 契约保持不变，客户端不需要改：/dsh-pet-memory（只读）与 /xu-diary/*（读写）。
+	const MEMORY_FILE = join(userRoot, "memory.json");
+	const DIARY_ROUTE = "/xu-diary";
+	const DIARY_MAX_BODY_BYTES = 512 * 1024;
+	const DIARY_MAX_CONTENT_CHARS = 20000;
+	const DIARY_AUTHORS = new Set(["絮", "你"]);
+	const DIARY_ID_PATTERN = /^(?:\d{8}-\d{6}(?:-\d+)?|\d{4}-\d{2}-\d{2})\.md$/;
+	// 每次现取，保证「重载配置」改了 diaryDir 后立即生效（不要缓存成 const）
+	const diaryDirNow = () => String(runtimeConfig.diaryDir || "").trim();
+	const dxPad = (v) => String(v).padStart(2, "0");
+	const dxLocalIso = (date = new Date()) => {
+		const offset = -date.getTimezoneOffset();
+		const sign = offset >= 0 ? "+" : "-";
+		const abs = Math.abs(offset);
+		return date.getFullYear() + "-" + dxPad(date.getMonth() + 1) + "-" + dxPad(date.getDate()) +
+			"T" + dxPad(date.getHours()) + ":" + dxPad(date.getMinutes()) + ":" + dxPad(date.getSeconds()) +
+			sign + dxPad(Math.floor(abs / 60)) + ":" + dxPad(abs % 60);
+	};
+	const dxFileStamp = (date = new Date()) =>
+		"" + date.getFullYear() + dxPad(date.getMonth() + 1) + dxPad(date.getDate()) +
+		"-" + dxPad(date.getHours()) + dxPad(date.getMinutes()) + dxPad(date.getSeconds());
+	const dxParseFront = (raw) => {
+		const text = String(raw ?? "").replace(/^\uFEFF/, "");
+		const match = /^---\r?\n([\s\S]*?)\r?\n---[ \t]*\r?\n?/.exec(text);
+		if (!match) return { meta: {}, content: text.replace(/^\s+/, "").trimEnd() };
+		const meta = {};
+		for (const line of match[1].split(/\r?\n/)) {
+			const at = line.indexOf(":");
+			if (at <= 0) continue;
+			const key = line.slice(0, at).trim();
+			const value = line.slice(at + 1).trim();
+			if (key) meta[key] = value;
+		}
+		return { meta, content: text.slice(match[0].length).replace(/^\s+/, "").trimEnd() };
+	};
+	const dxEnsureDir = async () => {
+		await mkdir(diaryDirNow(), { recursive: true });
+	};
+	const dxExists = async (path) => {
+		try {
+			await stat(path);
+			return true;
+		} catch {
+			return false;
+		}
+	};
+	const dxListEntries = async () => {
+		const dir = diaryDirNow();
+		await dxEnsureDir();
+		const names = await readdir(dir);
+		const entries = [];
+		for (const id of names) {
+			if (!id.toLowerCase().endsWith(".md")) continue;
+			const file = join(dir, id);
+			let raw;
+			let info;
+			try {
+				[raw, info] = await Promise.all([readFile(file, "utf8"), stat(file)]);
+			} catch {
+				continue;
+			}
+			const { meta, content } = dxParseFront(raw);
+			const parsed = Date.parse(meta.date ?? "");
+			entries.push({
+				id,
+				date: Number.isNaN(parsed) ? info.mtime.toISOString() : new Date(parsed).toISOString(),
+				author: DIARY_AUTHORS.has(meta.author) ? meta.author : "絮",
+				content,
+				bytes: info.size
+			});
+		}
+		entries.sort((a, b) => Date.parse(b.date) - Date.parse(a.date) || b.id.localeCompare(a.id));
+		return entries;
+	};
+	const dxCreateEntry = async ({ content, author }) => {
+		const dir = diaryDirNow();
+		const text = String(content ?? "").replace(/\r\n/g, "\n").trim();
+		if (text === "") throw new Error("日记内容为空");
+		if (text.length > DIARY_MAX_CONTENT_CHARS) throw new Error("日记内容过长（最多 " + DIARY_MAX_CONTENT_CHARS + " 字）");
+		const who = DIARY_AUTHORS.has(author) ? author : "你";
+		const now = new Date();
+		const iso = dxLocalIso(now);
+		await dxEnsureDir();
+		const base = dxFileStamp(now);
+		let id = base + ".md";
+		let attempt = 2;
+		while (await dxExists(join(dir, id))) {
+			id = base + "-" + attempt++ + ".md";
+			if (attempt > 99) throw new Error("无法生成日记文件名");
+		}
+		const body = "---\ndate: " + iso + "\nauthor: " + who + "\n---\n\n" + text + "\n";
+		const file = join(dir, id);
+		const temp = join(dir, "." + id + ".tmp");
+		await writeFile(temp, body, "utf8");
+		await rename(temp, file);
+		return { id, date: iso, author: who, content: text, bytes: Buffer.byteLength(body, "utf8") };
+	};
+	const dxDeleteEntry = async (id) => {
+		if (typeof id !== "string" || !DIARY_ID_PATTERN.test(id)) throw new Error("无效的日记 id");
+		const dir = diaryDirNow();
+		await dxEnsureDir();
+		try {
+			await unlink(join(dir, id));
+		} catch (error) {
+			if (error?.code === "ENOENT") throw new Error("这篇日记不存在");
+			throw error;
+		}
+		return id;
+	};
+	ctx.effect(() => ctx.webServer.register({
+		kind: "exact",
+		path: "/dsh-pet-memory",
+		handler: async (req, res) => {
+			if (req.method !== "GET" && req.method !== "HEAD") {
+				sendJson(res, 405, { ok: false, error: "method-not-allowed" });
+				return;
+			}
+			try {
+				const [raw, info] = await Promise.all([readFile(MEMORY_FILE, "utf8"), stat(MEMORY_FILE)]);
+				let data;
+				try {
+					data = JSON.parse(raw);
+				} catch (error) {
+					sendJson(res, 200, {
+						ok: false,
+						path: MEMORY_FILE,
+						mtime: info.mtimeMs,
+						error: "invalid-json",
+						detail: String(error?.message ?? error)
+					});
+					return;
+				}
+				sendJson(res, 200, {
+					ok: true,
+					path: MEMORY_FILE,
+					mtime: info.mtimeMs,
+					size: info.size,
+					data
+				});
+			} catch (error) {
+				sendJson(res, 200, {
+					ok: false,
+					path: MEMORY_FILE,
+					error: error?.code === "ENOENT" ? "missing" : "read-failed",
+					detail: String(error?.message ?? error)
+				});
+			}
+		}
+	}), "dsh-xilian-core: /dsh-pet-memory");
+	ctx.effect(() => ctx.webServer.register({
+		kind: "prefix",
+		path: DIARY_ROUTE,
+		handler: async (req, res) => {
+			try {
+				const url = new URL(req.url ?? "/", "http://localhost");
+				const path = url.pathname;
+				if (path === DIARY_ROUTE + "/entries" && req.method === "GET") {
+					const entries = await dxListEntries();
+					sendJson(res, 200, { ok: true, dir: diaryDirNow(), entries });
+					return;
+				}
+				if (path === DIARY_ROUTE + "/entries" && req.method === "POST") {
+					const body = JSON.parse((await readBody(req)) || "null") ?? {};
+					const entry = await dxCreateEntry({ content: body.content, author: body.author });
+					sendJson(res, 200, { ok: true, dir: diaryDirNow(), entry });
+					return;
+				}
+				if (path === DIARY_ROUTE + "/delete" && req.method === "POST") {
+					const body = JSON.parse((await readBody(req)) || "null") ?? {};
+					const id = await dxDeleteEntry(body.id);
+					sendJson(res, 200, { ok: true, id });
+					return;
+				}
+				if (path === DIARY_ROUTE + "/health" && req.method === "GET") {
+					await dxEnsureDir();
+					sendJson(res, 200, { ok: true, dir: diaryDirNow() });
+					return;
+				}
+				sendJson(res, 404, { ok: false, error: "not-found" });
+			} catch (error) {
+				sendJson(res, 200, { ok: false, error: String(error?.message ?? error) });
+			}
+		}
+	}), "dsh-xilian-core: /xu-diary");
 	ctx.effect(() => ctx.webServer.register({
 		kind: "prefix",
 		path: ROUTE_PREFIX,
