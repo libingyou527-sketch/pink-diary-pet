@@ -46,6 +46,11 @@ if (-not (Test-Path (Join-Path $Repo "api_v2.py"))) {
     exit 1
 }
 
+# api_v2.py prints the target text; Windows stdout defaults to GBK and any ♪ (U+266A)
+# in the text raises UnicodeEncodeError -> HTTP 400/500. Force UTF-8.
+$env:PYTHONIOENCODING = "utf-8"
+$env:PYTHONUTF8 = "1"
+$env:PYTHONLEGACYWINDOWSSTDIO = "0"
 Say "Starting GPT-SoVITS windowless on 127.0.0.1:$Port ..."
 $p = Start-Process -FilePath $Python `
     -ArgumentList @("api_v2.py", "-a", "127.0.0.1", "-p", "$Port") `

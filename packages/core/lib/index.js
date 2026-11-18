@@ -7703,7 +7703,16 @@ if (rest === "diary") {
 				cwd: cfg.repo,
 				detached: true,
 				windowsHide: true,
-				stdio: ["ignore", fd, fd]
+				stdio: ["ignore", fd, fd],
+				// 关键：api_v2.py 会用 print() 输出"目标文本"，而 Windows 默认 stdout 是 GBK。
+				// 文本里一旦有 ♪（U+266A）就抛 UnicodeEncodeError，接口直接 400/500。
+				// 强制 UTF-8 后 ♪ 不再炸（2026-11-18 实测：修复前 400，修复后 200）。
+				env: {
+					...process.env,
+					PYTHONIOENCODING: "utf-8",
+					PYTHONUTF8: "1",
+					PYTHONLEGACYWINDOWSSTDIO: "0"
+				}
 			});
 			child.unref();
 			gsvState.childPid = child.pid || 0;
