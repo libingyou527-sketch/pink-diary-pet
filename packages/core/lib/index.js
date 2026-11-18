@@ -7236,6 +7236,8 @@ if (rest === "diary") {
 						}
 					};
 					const result = await chatWithPet(petId$1, text, { images, videos });
+					// 模型判定这条要发语音时，先悄悄把语音服务唤醒（不阻塞回复）
+					if (result && result.voice === true) void ensureGsvRunning();
 					return {
 						kind: "json",
 						status: 200,
@@ -7366,6 +7368,9 @@ if (rest === "diary") {
 	// 禁用第三方 TTS 插件后，桌宠语音路径保持原样。
 	const TTS_AUDIO_PREFIX = "/dsh-tts-audio";
 	const ttsFiles = new Map();
+	// 空闲休眠相关：最近一次用语音的时间 + 正在合成的请求数（有请求时绝不休眠）
+	let gsvInFlight = 0;
+	let gsvLastUsedAt = Date.now();
 	const TTS_TAG_EMOJI = /\[表情[:：][^\]]*\]/g;
 	const TTS_TAG_VOICE = /\[语音\]/g;
 	const stripSpeakTags = (value) => String(value ?? "").replace(TTS_TAG_EMOJI, " ").replace(TTS_TAG_VOICE, " ").replace(/\s+/g, " ").trim();
@@ -7412,16 +7417,44 @@ if (rest === "diary") {
 			body,
 			signal: AbortSignal.timeout(120000)
 		});
+		gsvInFlight += 1;
+		gsvLastUsedAt = Date.now();
 		try {
-			response = await postTts();
-		} catch (error) {
-			// 冷启动期：服务刚被拉起、模型还在加载。等 3 秒再试一次，避免第一个请求白丢。
-			await new Promise((resolveWait) => setTimeout(resolveWait, 3000));
+			// 空闲休眠过的话，这里先把服务唤醒并等到端口就绪（有界等待）
+			let apiPort = 9880;
+			try {
+				const parsed = new URL(apiUrl);
+				apiPort = Number(parsed.port) || (parsed.protocol === "https:" ? 443 : 80);
+			} catch {}
+			if (!(await probeTcp(apiPort))) {
+				const launcher = readGsvLauncher();
+				appendGsvLog("synth requested while asleep; waking up (wait<=" + launcher.startWaitSeconds + "s)");
+				await ensureGsvRunning();
+				const deadline = Date.now() + launcher.startWaitSeconds * 1000;
+				while (Date.now() < deadline) {
+					if (await probeTcp(apiPort)) break;
+					await new Promise((resolveWait) => setTimeout(resolveWait, 1500));
+				}
+				gsvState.listening = await probeTcp(apiPort);
+				if (!gsvState.listening) {
+					throw new Error("语音服务正在启动（约 30-60 秒），本次先回退文字：端口 " + apiPort + " 尚未就绪");
+				}
+				appendGsvLog("awake after " + launcher.startWaitSeconds + "s window");
+			}
 			try {
 				response = await postTts();
-			} catch (error2) {
-				throw new Error("无法连接 GPT-SoVITS（" + apiUrl + "）：" + String(error2?.message ?? error2));
+			} catch (error) {
+				// 边界情况：刚就绪但首包还没准备好，等 3 秒再试一次
+				await new Promise((resolveWait) => setTimeout(resolveWait, 3000));
+				try {
+					response = await postTts();
+				} catch (error2) {
+					throw new Error("无法连接 GPT-SoVITS（" + apiUrl + "）：" + String(error2?.message ?? error2));
+				}
 			}
+		} finally {
+			gsvInFlight -= 1;
+			gsvLastUsedAt = Date.now();
 		}
 		if (!response.ok) throw new Error("GPT-SoVITS 合成失败（HTTP " + response.status + "）");
 		const buffer = Buffer.from(await response.arrayBuffer());
@@ -7522,7 +7555,11 @@ if (rest === "diary") {
 			port: numOr(launcher.port, 9880),
 			python: String(launcher.python || process.env.DSH_GSV_PYTHON || "D:\\tools\\miniconda3\\envs\\GPT\\python.exe"),
 			repo: String(launcher.repo || process.env.DSH_GSV_REPO || "D:\\tools\\GPT-SoVITS\\GPT-SoVITS-V2ProPlus-Windows-main"),
-			waitSeconds: numOr(launcher.waitSeconds, 180)
+			waitSeconds: numOr(launcher.waitSeconds, 180),
+			// 空闲休眠：多久没用语音就自动停掉服务（0 = 不睡）。默认 20 分钟。
+			idleStopMinutes: numOr(launcher.idleStopMinutes, 20),
+			// 冷启动时，一次合成最多等多久让服务就绪（超时则回退文字）
+			startWaitSeconds: Math.min(numOr(launcher.startWaitSeconds, 75), 240)
 		};
 	};
 	const waitForGsv = async (port, waitSeconds, startedAt) => {
@@ -7633,7 +7670,7 @@ if (rest === "diary") {
 		const result = await runCmd("ps", ["-p", String(pid), "-o", "comm="]);
 		return String(result.out || "").trim();
 	};
-	const stopGsv = async () => {
+	const stopGsv = async (why = "manual") => {
 		const port = numOr(readGsvLauncher().port, 9880);
 		const pid = await findPidByPort(port);
 		if (!pid) {
@@ -7668,6 +7705,34 @@ if (rest === "diary") {
 		appendGsvLog(gsvState.lastError);
 		return { ok: false, stopped: false, reason: "still-listening", pid, port };
 	};
+	// ---- 空闲休眠看门狗 ----
+	// GPT-SoVITS 空闲也占约 1.5GB 显存 + 3.4GB 内存，长时间不用没有意义。
+	// 超过 launcher.idleStopMinutes（默认 20 分钟，0 = 关闭）没有合成请求就停掉；
+	// 下次要合成时由 synthesizeGsv 自动唤醒（有界等待，超时则回退文字）。
+	ctx.effect(() => {
+		let disposed = false;
+		const timer = setInterval(async () => {
+			if (disposed) return;
+			try {
+				const cfg = readGsvLauncher();
+				if (!cfg.idleStopMinutes || cfg.idleStopMinutes <= 0) return;
+				if (gsvInFlight > 0) return;
+				const idleMs = Date.now() - gsvLastUsedAt;
+				if (idleMs < cfg.idleStopMinutes * 60000) return;
+				if (!(await probeTcp(cfg.port))) return;
+				appendGsvLog("idle " + Math.round(idleMs / 60000) + " min, no TTS traffic -> sleeping to free memory");
+				const result = await stopGsv("idle");
+				if (result.stopped) gsvState.reason = "idle-stopped";
+				appendGsvLog("idle sleep: " + JSON.stringify(result));
+			} catch (error) {
+				appendGsvLog("idle watchdog error: " + String(error?.message ?? error));
+			}
+		}, 60000);
+		return () => {
+			disposed = true;
+			clearInterval(timer);
+		};
+	}, "dsh-xilian-core: 空闲休眠看门狗");
 	ctx.effect(() => ctx.webServer.register({
 		kind: "exact",
 		path: "/dsh-tts-api/gsv-stop",
