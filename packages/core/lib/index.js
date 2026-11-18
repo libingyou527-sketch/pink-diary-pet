@@ -4434,7 +4434,10 @@ const finalizeEmojiReply = (text, userText = "") => {
     }).replace(VOICE_TAG_RE, () => {
         voiceRequested = true;
         return "";
-    }).replace(/\n{3,}/g, "\n\n").trim();
+    })
+        // 防御：模型偶尔模仿历史格式，在回复开头输出 "[MM-DD HH:MM:SS]"，剥掉
+        .replace(/^\[\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\]\s*/, "")
+        .replace(/\n{3,}/g, "\n\n").trim();
     if (!picked && EMOJI_REQUEST_RE.test(String(userText ?? ""))) {
         const fallback = emojiFallbackCandidates(1)[0];
         if (fallback) picked = fallback.file;
@@ -4582,7 +4585,7 @@ const appendUserPrivate = async (userId, name, text, reply, ts) => withUserStore
     const user = users[userId] ?? (users[userId] = { name: String(name || "群友"), private: { messages: [] }, groups: {} });
     user.private ?? (user.private = { messages: [] });
     user.private.messages.push({ role: "user", content: withMessageTime(String(text ?? ""), ts), ts });
-    user.private.messages.push({ role: "assistant", content: withMessageTime(String(reply ?? ""), ts), ts });
+    user.private.messages.push({ role: "assistant", content: String(reply ?? ""), ts });
     user.private.messages = user.private.messages.slice(-USER_RECORD_LIMIT);
     await writeUserJson(USER_MEMORY_PATH, store);
 });
@@ -4595,7 +4598,7 @@ const appendUserGroup = async (userId, name, groupId, text, reply, ts) => withUs
     user.lastGroupId = groupId;
     const bucket = user.groups[groupId] ?? (user.groups[groupId] = { messages: [] });
     bucket.messages.push({ role: "user", content: withMessageTime(String(text ?? ""), ts), ts });
-    bucket.messages.push({ role: "assistant", content: withMessageTime(String(reply ?? ""), ts), ts });
+    bucket.messages.push({ role: "assistant", content: String(reply ?? ""), ts });
     bucket.messages = bucket.messages.slice(-USER_RECORD_LIMIT);
     await writeUserJson(USER_GROUP_MEMORY_PATH, store);
 });
@@ -5323,7 +5326,7 @@ const chatWithPetShared = async (petId, text, images = [], imagePaths = [], vide
         source,
         ...(pictureMetas.length > 0 ? { images: pictureMetas } : {})
     });
-    entry.messages.push({ role: "assistant", content: withMessageTime(final.text, now), ts: now, source });
+    entry.messages.push({ role: "assistant", content: final.text, ts: now, source });
     await writeMemory(mem);
     return { text: final.text, emoji: final.emoji, voice: final.voice };
 });
@@ -5712,9 +5715,10 @@ ctx.effect(() => {
 			source,
 			...(pictureMetas.length > 0 ? { images: pictureMetas } : {})
 		});
+		// 助手回复不存时间戳（避免模型模仿出 "[MM-DD HH:MM:SS]" 前缀，见 5326 处说明）
 		entry.messages.push({
 			role: "assistant",
-			content: withMessageTime(final.text, now),
+			content: final.text,
 			ts: now,
 			source
 		});
@@ -7633,6 +7637,23 @@ if (rest === "diary") {
 		}
 	}), "dsh-xilian-core: /dsh-tts-api/gsv-status");
 	void ensureGsvRunning();
+
+	// 把宿主 origin 暴露给 QQ 网关：QQ 侧语音优先走我们的 /dsh-tts-api/speak，
+	// 好处是自动唤醒（服务可能在空闲休眠）+ 统一写 gpt-sovits.log，失败可查。
+	try {
+		const hostPort = typeof ctx.webServer?.port === "number" ? ctx.webServer.port : 0;
+		if (hostPort > 0) {
+			const qqDir = join(resolveDshHome(), "qqbot");
+			mkdirSync(qqDir, { recursive: true });
+			writeFileSync(join(qqDir, "pet-host.json"), JSON.stringify({
+				origin: "http://127.0.0.1:" + hostPort,
+				updatedAt: Date.now()
+			}), "utf8");
+			appendGsvLog("host origin for QQ = http://127.0.0.1:" + hostPort);
+		}
+	} catch (error) {
+		console.warn("[xilian] 写入 pet-host.json 失败：" + String(error?.message ?? error));
+	}
 	const runCmd = (file, args) => new Promise((done) => {
 		let finished = false;
 		const finish = (result) => {
