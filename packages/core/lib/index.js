@@ -7558,6 +7558,8 @@ if (rest === "diary") {
 			waitSeconds: numOr(launcher.waitSeconds, 180),
 			// 空闲休眠：多久没用语音就自动停掉服务（0 = 不睡）。默认 20 分钟。
 			idleStopMinutes: numOr(launcher.idleStopMinutes, 20),
+			// 空闲修剪工作集：多久没用就把内存页挤回 pagefile（0 = 不修剪）。默认 5 分钟。
+			trimIdleMinutes: numOr(launcher.trimIdleMinutes, 5),
 			// 冷启动时，一次合成最多等多久让服务就绪（超时则回退文字）
 			startWaitSeconds: Math.min(numOr(launcher.startWaitSeconds, 75), 240)
 		};
@@ -7708,6 +7710,32 @@ if (rest === "diary") {
 		appendGsvLog(gsvState.lastError);
 		return { ok: false, stopped: false, reason: "still-listening", pid, port };
 	};
+	// ---- 工作集修剪 ----
+	// GPT-SoVITS 推理后工作集会涨到 ~3.8GB（CUDA 主机侧缓存 + 模型页），
+	// 但空闲时这些页都可以先挤回 pagefile：EmptyWorkingSet 后实测 3853MB -> 4MB，
+	// 进程不受影响，下次合成多花约 0.7s 换入。
+	const TRIM_PS1 = Buffer.from(
+		"IyBUcmltIHRoZSB3b3JraW5nIHNldCBvZiBhIHByb2Nlc3M6IHB1c2ggaXRzIHBhZ2VzIG91dCB0byB0aGUgcGFnZWZpbGUgd2l0aG91dAojIGtpbGxpbmcgaXQuIE1lYXN1cmVkIGVmZmVjdCBvbiBHUFQtU29WSVRTIGFmdGVyIGEgc3ludGhlc2lzOiB+My44R0IgLT4gfjRNQgojIHdvcmtpbmcgc2V0LCBhdCB0aGUgY29zdCBvZiB+MC43cyBwYWdlLWluIG9uIHRoZSBuZXh0IHJlcXVlc3QuCiMgQVNDSUkgb25seTogV2luZG93cyBQb3dlclNoZWxsIHJlYWRzIEJPTS1sZXNzIC5wczEgYXMgQU5TSS4KcGFyYW0oCiAgICBbUGFyYW1ldGVyKE1hbmRhdG9yeSA9ICR0cnVlKV1baW50XSRUYXJnZXRQaWQKKQoKJEVycm9yQWN0aW9uUHJlZmVyZW5jZSA9ICJTdG9wIgoKJHNyYyA9IEAnCnVzaW5nIFN5c3RlbTsKdXNpbmcgU3lzdGVtLlJ1bnRpbWUuSW50ZXJvcFNlcnZpY2VzOwpwdWJsaWMgc3RhdGljIGNsYXNzIFhpbGlhbldzIHsKICAgIFtEbGxJbXBvcnQoInBzYXBpLmRsbCIsIFNldExhc3RFcnJvciA9IHRydWUpXQogICAgcHVibGljIHN0YXRpYyBleHRlcm4gYm9vbCBFbXB0eVdvcmtpbmdTZXQoSW50UHRyIGhQcm9jZXNzKTsKICAgIFtEbGxJbXBvcnQoImtlcm5lbDMyLmRsbCIsIFNldExhc3RFcnJvciA9IHRydWUpXQogICAgcHVibGljIHN0YXRpYyBleHRlcm4gSW50UHRyIE9wZW5Qcm9jZXNzKHVpbnQgYWNjZXNzLCBib29sIGluaGVyaXQsIGludCBwaWQpOwogICAgW0RsbEltcG9ydCgia2VybmVsMzIuZGxsIiwgU2V0TGFzdEVycm9yID0gdHJ1ZSldCiAgICBwdWJsaWMgc3RhdGljIGV4dGVybiBib29sIENsb3NlSGFuZGxlKEludFB0ciBoKTsKfQonQAoKaWYgKC1ub3QgKCJYaWxpYW5XcyIgLWFzIFt0eXBlXSkpIHsKICAgIEFkZC1UeXBlIC1UeXBlRGVmaW5pdGlvbiAkc3JjCn0KCiRoYW5kbGUgPSBbWGlsaWFuV3NdOjpPcGVuUHJvY2VzcygweDFGMEZGRiwgJGZhbHNlLCAkVGFyZ2V0UGlkKQppZiAoJGhhbmRsZSAtZXEgW0ludFB0cl06Olplcm8pIHsKICAgIFdyaXRlLUVycm9yICJjYW5ub3Qgb3BlbiBwaWQgJFRhcmdldFBpZCIKICAgIGV4aXQgMgp9Cgp0cnkgewogICAgJG9rID0gW1hpbGlhbldzXTo6RW1wdHlXb3JraW5nU2V0KCRoYW5kbGUpCn0gZmluYWxseSB7CiAgICBbWGlsaWFuV3NdOjpDbG9zZUhhbmRsZSgkaGFuZGxlKSB8IE91dC1OdWxsCn0KCmlmICgkb2spIHsKICAgIGV4aXQgMAp9IGVsc2UgewogICAgV3JpdGUtRXJyb3IgIkVtcHR5V29ya2luZ1NldCBmYWlsZWQgZm9yIHBpZCAkVGFyZ2V0UGlkIgogICAgZXhpdCAzCn0K",
+		"base64"
+	).toString("utf8");
+	let gsvLastTrimAt = 0;
+	const trimGsvWorkingSet = async () => {
+		const cfg = readGsvLauncher();
+		const pid = gsvState.childPid || (await findPidByPort(cfg.port));
+		if (!pid) return;
+		if (Date.now() - gsvLastTrimAt < 60000) return;
+		gsvLastTrimAt = Date.now();
+		try {
+			const dir = join(resolveDshHome(), "xilian-tts");
+			mkdirSync(dir, { recursive: true });
+			const scriptPath = join(dir, "trim-ws.ps1");
+			writeFileSync(scriptPath, TRIM_PS1 + "\n", "utf8");
+			const result = await runCmd("powershell", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", scriptPath, "-TargetPid", String(pid)]);
+			appendGsvLog("trim working set pid=" + pid + " exit=" + result.code);
+		} catch (error) {
+			appendGsvLog("trim failed: " + String(error?.message ?? error));
+		}
+	};
 	// ---- 空闲休眠看门狗 ----
 	// GPT-SoVITS 空闲也占约 1.5GB 显存 + 3.4GB 内存，长时间不用没有意义。
 	// 超过 launcher.idleStopMinutes（默认 20 分钟，0 = 关闭）没有合成请求就停掉；
@@ -7721,6 +7749,10 @@ if (rest === "diary") {
 				if (!cfg.idleStopMinutes || cfg.idleStopMinutes <= 0) return;
 				if (gsvInFlight > 0) return;
 				const idleMs = Date.now() - gsvLastUsedAt;
+				// 中间档：空闲先修剪工作集（内存显示接近 0，进程仍在，换入约 0.7s）
+				if (cfg.trimIdleMinutes > 0 && idleMs >= cfg.trimIdleMinutes * 60000) {
+					await trimGsvWorkingSet();
+				}
 				if (idleMs < cfg.idleStopMinutes * 60000) return;
 				if (!(await probeTcp(cfg.port))) return;
 				appendGsvLog("idle " + Math.round(idleMs / 60000) + " min, no TTS traffic -> sleeping to free memory");

@@ -15,20 +15,28 @@ DSH 启动 → 插件加载 → 探测 9880
 日志：`C:\Users\lby16\.dsh\xilian-tts\gpt-sovits.log`
 状态：`GET http://127.0.0.1:<DSH端口>/dsh-tts-api/gsv-status`
 
-## 空闲会自动休眠（2026-11-18 新增）
+## 空闲会分两级处理（2026-11-18 新增）
 
-GPT-SoVITS 空闲也占 **约 1.5GB 显存 + 1.7–3.4GB 内存**，所以加了看门狗：
+GPT-SoVITS 空闲也占 **约 1.5GB 显存 + 1.7–3.8GB 内存**，所以做了两级：
 
 ```text
-settings.json → launcher.idleStopMinutes   默认 20 分钟（0 = 不休眠）
-超过该时间没有 /dsh-tts-api/speak 请求 → 自动停掉服务
-下次要用时：synthesizeGsv 先唤醒并最多等 launcher.startWaitSeconds（默认 75s）
-            等不到就把这条语音降级成文字（不会卡死聊天）
+launcher.trimIdleMinutes  默认 5 分钟（0 = 不修剪）
+  空闲 5 分钟 → EmptyWorkingSet：把内存页挤回 pagefile，进程不退出
+                实测 3853MB -> 4MB；下次合成多花约 0.7s 换入
+
+launcher.idleStopMinutes  默认 20 分钟（0 = 不休眠）
+  空闲 20 分钟 → 停掉服务，显存和内存全部释放（归零）
+
+下次要用：synthesizeGsv 先唤醒并最多等 launcher.startWaitSeconds（默认 75s）
+          等不到就把这条语音降级成文字（不会卡死聊天）
 另外：模型判定要发语音时，chat 路由会先悄悄唤醒服务（不阻塞回复）
 ```
 
 **代价**：休眠后第一条语音大约要等 30–60 秒（模型冷启动），期间可能回退文字。
 嫌慢就把 `idleStopMinutes` 调大（例如 120），或设 0 完全关掉休眠。
+
+**重要**：修剪只降低"工作集"（任务管理器显示的数字），**提交内存仍是约 6.1GB**
+——那是模型权重 + CUDA 上下文的真实占用，进程活着就还在。要真正归零只能休眠/退出。
 
 ## 脚本
 
@@ -36,12 +44,16 @@ settings.json → launcher.idleStopMinutes   默认 20 分钟（0 = 不休眠）
 |---|---|
 | `start.ps1` | 真正逻辑：端口探测 → 无窗口启动 → 轮询就绪 |
 | `stop.ps1` | 按端口找 PID → 确认是 python → 杀 → 确认端口关闭 |
+| `trim-ws.ps1` | 修剪指定 PID 的工作集（插件里也内嵌了同一份，base64 存在 index.js） |
 | `启动GPT-SoVITS.bat` | 壳，调用 `start.ps1`（失败时暂停便于看错误） |
 | `停止GPT-SoVITS.bat` | 壳，调用 `stop.ps1` |
 
 **为什么逻辑放在 .ps1**：批处理里写中文注释会被 cmd 按 GBK 解析成乱码，
 其中的全角括号/逗号会被当成命令分隔符，直接把脚本搞崩。
 所以 `.bat` 只有三行，`.ps1` 全部纯 ASCII。
+
+**为什么修剪脚本的参数叫 `TargetPid`**：`$Pid` 是 PowerShell 的只读自动变量
+（当前进程 ID），用作参数名会直接报 "Cannot overwrite variable Pid"。
 
 **为什么不用 `pythonw.exe`**：pythonw 没有 stdout，uvicorn 写日志时会因为
 `sys.stdout is None` 直接失败。无窗口是靠 `Start-Process -WindowStyle Hidden`
