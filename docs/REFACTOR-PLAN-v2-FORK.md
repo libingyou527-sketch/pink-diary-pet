@@ -492,3 +492,13 @@ F3.5 TTS 折入 core（当前仍由 @memef1f1y/dsh-plugin-tts 提供 gptsovits p
 F3.6 memory/diary 的路由并入 core（当前仍由两个独立 UI 插件提供）
 收尾  定位稳定后可将自诊断入口换回普通入口（也可保留，代价仅每次启动 7 行日志）
 ```
+
+### 10.9 F3.5 / F3.6 结果（2026-11-18 18:43）
+
+```text
+F3.5 TTS 折入 core   ✅ 完成并验收（GET 405 判别为 core 处理器；合成 3.90s 正常）
+F3.6 记忆/日记路由   ⏸ 有意暂缓，绑定到"数据目录改名"那一步一起做
+```
+
+F3.5 之后，语音链路只剩我们自己：客户端 -> core(/dsh-tts-api/speak) -> GPT-SoVITS(9880)。
+第三方 TTS 插件已从 bundles 移除，不再随 DSH 升级受影响。
