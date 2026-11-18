@@ -5078,38 +5078,43 @@ const cleanupBlankYesterdayDiary = async (reason) => {
 		const state = await readDiaryState();
 		if (state.blankCleanupDate === todayKey) return false;
 		const yesterday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
-		const file = diaryFileForDay(yesterday);
 		const dayKey = diaryDateKey(yesterday);
+		// 不自己拼路径：直接列目录按文件名找，避开 DIARY_DIR 常量与 runtimeConfig 可能不一致的情况。
+		const dir = diaryDirNow();
+		let file = "";
 		let result = "absent";
 		let body = "";
 		try {
-			body = splitDiary(await readFile(file, "utf8")).body.trim();
-		} catch (error) {
-			if (error?.code === "ENOENT") {
+			const names = await readdir(dir);
+			const hitName = names.find((n) => n === dayKey + ".md");
+			if (!hitName) {
 				result = "absent";
 			} else {
-				result = "read-failed";
-				diaryLog("[日记系统] 昨日文件读取失败：" + String(error?.message ?? error));
+				file = join(dir, hitName);
+				body = splitDiary(await readFile(file, "utf8")).body.trim();
 			}
+		} catch (error) {
+			result = "read-failed";
+			diaryLog("[日记系统] 昨日文件读取失败 dir=" + dir + " code=" + String(error?.code ?? "") + " msg=" + String(error?.message ?? error));
 		}
-		if (result !== "absent") {
-			if (body !== "") {
-				result = "kept-content";
-			} else if (await hasConversationOnDay(yesterday)) {
-				result = "kept-chat";
-			} else {
-				try {
-					await queueDiaryWrite(async () => {
-						await unlink(file);
-					});
-					diaryCache = {
-						at: 0,
-						text: ""
-					};
-					result = "deleted";
-				} catch (error) {
-					result = "delete-failed";
-				}
+		if (!file) {
+			result = result === "read-failed" ? "read-failed" : "absent";
+		} else if (body !== "") {
+			result = "kept-content";
+		} else if (await hasConversationOnDay(yesterday)) {
+			result = "kept-chat";
+		} else {
+			try {
+				await queueDiaryWrite(async () => {
+					await unlink(file);
+				});
+				diaryCache = {
+					at: 0,
+					text: ""
+				};
+				result = "deleted";
+			} catch (error) {
+				result = "delete-failed";
 			}
 		}
 		await writeDiaryState({
@@ -5118,7 +5123,7 @@ const cleanupBlankYesterdayDiary = async (reason) => {
 			blankCleanupAt: now.toISOString(),
 			blankCleanupResult: result
 		});
-		diaryLog("[日记系统] 昨日空白清理 runner=" + reason + " date=" + dayKey + " 结果=" + result);
+		diaryLog("[日记系统] 昨日空白清理 runner=" + reason + " date=" + dayKey + " 结果=" + result + (file ? " file=" + file : " dir=" + dir));
 		return result === "deleted";
 	} catch (error) {
 		diaryLog("[日记系统] 昨日空白清理异常：" + String(error?.message ?? error));
