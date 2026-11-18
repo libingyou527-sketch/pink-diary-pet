@@ -30,10 +30,8 @@
 ## 2. 旧路径还在用 —— 靠 junction
 
 ```text
-~/.dsh/dsh-pet      ->  ~/.dsh/xilian/pet          (Junction)
-~/.dsh/tts-gsv      ->  ~/.dsh/xilian/tts          (Junction)
-~/.dsh/xilian-tts   ->  ~/.dsh/xilian/tts/audio    (Junction)
-```
+~/.dsh/xilian/pet    ← 实际位置（2026-11-18 起代码直接读写这里，不再经过 junction）
+~/.dsh/xilian/tts     ← 实际位置（设置 settings.json + 音频 audio/）
 
 **为什么保留**：两个 UI 插件（记忆查看、日记）和部分旧脚本仍按旧路径读取。
 junction 让它们零改动继续工作，同时真实数据已经在 `xilian/` 下。

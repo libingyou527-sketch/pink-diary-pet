@@ -11,8 +11,8 @@ qq:
 paths:
   # The directory is created automatically by the installer and at runtime.
   diaryDir: "~/.dsh/pink-diary"
-  pictureDir: "~/.dsh/dsh-pet/pictures"
-  memoryDir: "~/.dsh/dsh-pet"
+  pictureDir: "~/.dsh/xilian/pet/pictures"
+  memoryDir: "~/.dsh/xilian/pet"
 
 context:
   window: 1000000
@@ -25,7 +25,7 @@ memoryBlocks:
   # Experimental: structured block ledger + background summaries.
   # Keep false until the branch is reviewed and tested.
   enabled: false
-  file: "~/.dsh/dsh-pet/context-blocks.json"
+  file: "~/.dsh/xilian/pet/context-blocks.json"
 
 video:
   # Optional: dsh-video-storyboard CLI adapter for QQ/local MP4.
@@ -33,7 +33,7 @@ video:
   ffmpegPath: "C:/path/to/tools/ffmpeg/ffmpeg.exe"
   ffprobePath: "C:/path/to/tools/ffmpeg/ffprobe.exe"
   timeoutMs: 20000
-  workDir: "~/.dsh/dsh-pet/video-storyboard"
+  workDir: "~/.dsh/xilian/pet/video-storyboard"
 
 profile:
   # DSH Desktop profile name.

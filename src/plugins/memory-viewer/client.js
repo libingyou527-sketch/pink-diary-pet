@@ -8,7 +8,7 @@ window.__ModuleLoader__.load({
     const PANEL_ID = 'dsh-pet-memory'
     const ROUTE = '/dsh-pet-memory'
     const PET_CHAT_ROUTE = '/dsh-pet-7340/chat?pet=main&surface=any'
-    const MEMORY_HINT = '~/.dsh/dsh-pet/memory.json'
+    const MEMORY_HINT = '~/.dsh/xilian/pet/memory.json'
     const MAX_TEXT = 2000
 
     const zh = {

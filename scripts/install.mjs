@@ -42,8 +42,8 @@ const ownerOpenIds = (process.env.OWNER_OPENIDS || env.OWNER_OPENIDS ? String(pr
     .map((value) => String(value).trim())
     .filter(Boolean);
 const diaryDir = expandHome(process.env.PINK_DIARY_DIR || env.PINK_DIARY_DIR || paths.diaryDir || join(dshHome, "pink-diary"));
-const pictureDir = expandHome(process.env.PINK_PICTURE_DIR || env.PINK_PICTURE_DIR || paths.pictureDir || join(dshHome, "dsh-pet", "pictures"));
-const memoryDir = expandHome(paths.memoryDir || join(dshHome, "dsh-pet"));
+const pictureDir = expandHome(process.env.PINK_PICTURE_DIR || env.PINK_PICTURE_DIR || paths.pictureDir || join(dshHome, "xilian", "pet", "pictures"));
+const memoryDir = expandHome(paths.memoryDir || join(dshHome, "xilian", "pet"));
 
 if (!existsSync(join(profileDir, "package.json"))) {
     console.error("DSH profile not found: " + profileDir);

@@ -3762,7 +3762,7 @@ function readBody(req) {
 }
 function apply(ctx) {
 	const dshHome = dshHomeDir();
-	const userRoot = join(dshHome, "dsh-pet");
+	const userRoot = join(dshHome, "xilian", "pet");
 	const userConfigPath = join(userRoot, "main-config.jsonc");
 	const legacyUserConfigPath = join(userRoot, "main-config.json");
 	const petConfigDir = join(userRoot, "pet");
@@ -6596,7 +6596,7 @@ function parseArgs(argv) {
 	return { options };
 }
 function configPathsFor(root, home) {
-	const userRoot = join(home, "dsh-pet");
+	const userRoot = join(home, "xilian", "pet");
 	return {
 		defaultFile: join(root, "assets", "config.jsonc"),
 		userFile: join(userRoot, "main-config.jsonc"),
@@ -6695,7 +6695,7 @@ function restrictFile(path) {
 	});
 }
 function configPath(home) {
-	const directory = join(home, "dsh-pet");
+	const directory = join(home, "xilian", "pet");
 	if (!existsSync(directory)) mkdirSync(directory, {
 		recursive: true,
 		mode: 448
@@ -7222,7 +7222,7 @@ function createStandaloneAi(home, logger, dependencies = {}) {
 //#endregion
 //#region src/standalone/runtime-state.ts
 function writeStandaloneRuntime(home, details) {
-	const directory = join(home, "dsh-pet");
+	const directory = join(home, "xilian", "pet");
 	mkdirSync(directory, { recursive: true });
 	const file = join(directory, "standalone-runtime.json");
 	try {

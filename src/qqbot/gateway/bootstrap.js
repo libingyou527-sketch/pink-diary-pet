@@ -45,7 +45,7 @@ function dispatchInteraction(event, manager) {
 /** GPT-SoVITS 语音配置（独立于已废弃的 ChatTTS/RVC 管线）。 */
 function readGsvSettings() {
     try {
-        const file = join(homedir(), ".dsh", "tts-gsv", "settings.json");
+        const file = join(homedir(), ".dsh", "xilian", "tts", "settings.json");
         const data = JSON.parse(readFileSync(file, "utf8"));
         return data && typeof data === "object" ? data : {};
     } catch {

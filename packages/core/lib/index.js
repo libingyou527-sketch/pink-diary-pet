@@ -557,7 +557,7 @@ function logTokenUsage(usage, sel, kind = "chat") {
 		(usage ? "" : " (usage unavailable)");
 	console.log(line);
 	try {
-		appendFileSync(join(resolveDshHome(), "dsh-pet", "token-usage.log"), line + "\n", "utf8");
+		appendFileSync(join(resolveDshHome(), "xilian", "pet", "token-usage.log"), line + "\n", "utf8");
 	} catch {}
 }
 /** 用**一个**确定的 provider/model 跑一次生成（候选链的一环；失败原样返回结构化原因，不吞） */
@@ -3816,7 +3816,7 @@ const reloadRuntimeConfig = () => {
 	const memoryBlockStore = runtimeConfig.memoryBlocksEnabled
 		? createMemoryBlockStore({ filePath: runtimeConfig.memoryBlocksFile })
 		: null;
-	const userRoot = join(dshHome, "dsh-pet");
+	const userRoot = join(dshHome, "xilian", "pet");
 	const userConfigPath = join(userRoot, "main-config.jsonc");
 	const legacyUserConfigPath = join(userRoot, "main-config.json");
 	const petConfigDir = join(userRoot, "pet");
@@ -7681,7 +7681,7 @@ if (rest === "diary") {
 	const stripSpeakTags = (value) => String(value ?? "").replace(TTS_TAG_EMOJI, " ").replace(TTS_TAG_VOICE, " ").replace(/\s+/g, " ").trim();
 	const readGsvSettings = () => {
 		try {
-			return JSON.parse(readFileSync(join(resolveDshHome(), "tts-gsv", "settings.json"), "utf8")) || {};
+			return JSON.parse(readFileSync(join(resolveDshHome(), "xilian", "tts", "settings.json"), "utf8")) || {};
 		} catch {
 			return {};
 		}
@@ -7764,7 +7764,7 @@ if (rest === "diary") {
 		if (!response.ok) throw new Error("GPT-SoVITS 合成失败（HTTP " + response.status + "）");
 		const buffer = Buffer.from(await response.arrayBuffer());
 		if (buffer.length < 44) throw new Error("GPT-SoVITS 返回的音频为空");
-		const dir = join(resolveDshHome(), "xilian-tts");
+		const dir = join(resolveDshHome(), "xilian", "tts", "audio");
 		mkdirSync(dir, { recursive: true });
 		const id = "a" + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 		const file = join(dir, id + ".wav");
@@ -7826,7 +7826,7 @@ if (rest === "diary") {
 	} catch (error) {
 		console.warn("[xilian] TTS 路由注册失败（语音将不可用）：" + String(error?.message ?? error));
 	}
-	const GSV_LOG_DIR = join(resolveDshHome(), "xilian-tts");
+	const GSV_LOG_DIR = join(resolveDshHome(), "xilian", "tts", "audio");
 	const GSV_LAUNCH_LOG = join(GSV_LOG_DIR, "gpt-sovits.log");
 	const GSV_SERVER_LOG = join(GSV_LOG_DIR, "gpt-sovits-server.log");
 	const gsvState = { listening: false, childPid: 0, lastStartAt: 0, lastReadyAt: 0, lastError: null, reason: "" };
@@ -8057,7 +8057,7 @@ if (rest === "diary") {
 		if (Date.now() - gsvLastTrimAt < 60000) return;
 		gsvLastTrimAt = Date.now();
 		try {
-			const dir = join(resolveDshHome(), "xilian-tts");
+			const dir = join(resolveDshHome(), "xilian", "tts", "audio");
 			mkdirSync(dir, { recursive: true });
 			const scriptPath = join(dir, "trim-ws.ps1");
 			writeFileSync(scriptPath, TRIM_PS1 + "\n", "utf8");
