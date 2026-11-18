@@ -8,6 +8,7 @@ window.__ModuleLoader__.load({
     const PANEL_ID = 'xu-pink-diary'
     const DIARY_ROUTE = '/xu-diary'
     const PET_CHAT_ROUTE = '/dsh-pet-7340/chat?pet=main&surface=any'
+    const SUMMARY_ROUTE = '/dsh-pet-7340/diary/summary?pet=main&surface=any'
     const FALLBACK_DIR = '~/.dsh/pink-diary'
     const PINK = '#ec4899'
     const PINK_DARK = '#db2777'
@@ -16,13 +17,18 @@ window.__ModuleLoader__.load({
       panel: '絮的粉色日记',
       title: '絮的粉色日记',
       subtitle: 'dsh-pet · 粉色日记本',
-      autoNote: '珍贵对话自动记入当天日记；每天 23:59 写一日总结。',
+      autoNote: '珍贵对话自动记入当天日记；每天 23:59 写一日总结，也可以随时点「写今日总结」提前写——每天只会有一篇。',
       count: '篇日记',
       updated: '最近更新',
       refresh: '刷新',
       refreshing: '刷新中…',
       writeForMe: '让絮写今天',
       writing: '絮正在写…',
+      summaryForMe: '写今日总结',
+      summarizing: '絮在总结…',
+      summaryDone: '今天已经有一日总结了',
+      summaryTooEarly: '今天对话还太少，晚点再让絮总结吧',
+      summaryBusy: '絮正在写别的，稍后再试',
       readByPet: '让絮读',
       reading: '絮正在读…',
       delete: '删除',
@@ -48,13 +54,18 @@ window.__ModuleLoader__.load({
       panel: "Xu's Pink Diary",
       title: "Xu's Pink Diary",
       subtitle: 'dsh-pet · pink diary',
-      autoNote: 'Precious moments are written into today’s diary; a daily summary is added at 23:59.',
+      autoNote: 'Precious moments go into today’s diary; a summary is added at 23:59, or write it early with the button above — once per day.',
       count: 'entries',
       updated: 'Updated',
       refresh: 'Refresh',
       refreshing: 'Refreshing…',
       writeForMe: 'Let Xu write',
       writing: 'Xu is writing…',
+      summaryForMe: 'Write today\'s summary',
+      summarizing: 'Xu is summarizing…',
+      summaryDone: 'Today\'s summary already exists',
+      summaryTooEarly: 'Too few messages today - try again later',
+      summaryBusy: 'Xu is busy writing - try again later',
       readByPet: 'Let Xu read',
       reading: 'Xu is reading…',
       delete: 'Delete',
@@ -245,6 +256,7 @@ window.__ModuleLoader__.load({
       const [author, setAuthor] = React.useState('你')
       const [saving, setSaving] = React.useState(false)
       const [petBusy, setPetBusy] = React.useState(null)
+      const [summary, setSummary] = React.useState(null)
       const [deletingId, setDeletingId] = React.useState(null)
       const [comments, setComments] = React.useState({})
       const scrollRef = React.useRef(null)
@@ -263,9 +275,20 @@ window.__ModuleLoader__.load({
         }
       }, [])
 
+      const refreshSummary = React.useCallback(async () => {
+        try {
+          const response = await fetch(SUMMARY_ROUTE + '&t=' + Date.now(), { cache: 'no-store' })
+          const result = await response.json().catch(() => null)
+          if (result && result.ok === true) setSummary(result)
+        } catch {
+          // 拿不到状态就当未知，按钮仍可点（服务端还会再挡一次）
+        }
+      }, [])
+
       React.useEffect(() => {
         load(false)
-      }, [load])
+        refreshSummary()
+      }, [load, refreshSummary])
 
       const saveManual = React.useCallback(async () => {
         const text = draft.trim()
@@ -283,6 +306,38 @@ window.__ModuleLoader__.load({
           setSaving(false)
         }
       }, [draft, author, saving, load])
+
+      const writeSummary = React.useCallback(async () => {
+        if (petBusy || (summary && summary.exists === true)) return
+        setPetBusy('summary')
+        setError(null)
+        try {
+          const response = await fetch(SUMMARY_ROUTE, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', accept: 'application/json' },
+            body: '{}',
+          })
+          const result = await response.json().catch(() => null)
+          if (result && result.ok === true) {
+            await load(true)
+            await refreshSummary()
+            if (scrollRef.current) scrollRef.current.scrollTop = 0
+          } else if (result && result.reason === 'too-early') {
+            setError(t('summaryTooEarly') + '（' + String(result.messages ?? 0) + '/' + String(result.minMessages ?? 4) + '）')
+          } else if (result && result.reason === 'summary-exists') {
+            await refreshSummary()
+            setError(t('summaryDone') + (result.at ? '（' + result.at + '）' : ''))
+          } else if (result && result.reason === 'busy') {
+            setError(t('summaryBusy'))
+          } else {
+            throw new Error((result && (result.message || result.reason)) || 'HTTP ' + response.status)
+          }
+        } catch (error) {
+          setError(String(error?.message ?? error))
+        } finally {
+          setPetBusy(null)
+        }
+      }, [petBusy, summary, load, refreshSummary, t])
 
       const writeByPet = React.useCallback(async () => {
         if (petBusy) return
@@ -376,6 +431,21 @@ window.__ModuleLoader__.load({
             'button',
             { type: 'button', style: S.primary, onClick: writeByPet, disabled: Boolean(petBusy) },
             petBusy === 'write' ? t('writing') : t('writeForMe'),
+          ),
+          h(
+            'button',
+            {
+              type: 'button',
+              style: S.ghost,
+              onClick: writeSummary,
+              disabled: Boolean(petBusy) || Boolean(summary && summary.exists === true),
+              title: summary && summary.exists === true && summary.at ? t('summaryDone') + ' ' + summary.at : undefined,
+            },
+            petBusy === 'summary'
+              ? t('summarizing')
+              : summary && summary.exists === true
+                ? t('summaryDone')
+                : t('summaryForMe'),
           ),
           h(
             'button',

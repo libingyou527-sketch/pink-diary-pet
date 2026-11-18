@@ -4992,6 +4992,38 @@ const appendTodayDiary = (title, text, at = new Date()) => queueDiaryWrite(async
     diaryCache = { at: 0, text: "" };
     return { file, title };
 });
+/** 一日总结的小节标题（与 writeDailySummary 写入时保持一致） */
+const SUMMARY_TITLE = "一日总结";
+/**
+ * 今天是否已经写过「一日总结」。
+ * 注意：不能用"文件是否存在"当判据——00:01 就会建空白骨架。
+ * 返回 { exists, at: "HH:MM" }。
+ */
+const hasTodaySummary = async () => {
+	try {
+		const body = splitDiary(await readFile(diaryFileForDay(), "utf8")).body;
+		const hit = new RegExp("^## (\\d{2}:\\d{2}) · " + SUMMARY_TITLE + "$", "m").exec(body);
+		return hit ? {
+			exists: true,
+			at: hit[1]
+		} : {
+			exists: false
+		};
+	} catch {
+		return {
+			exists: false
+		};
+	}
+};
+/** 今天（本地日期）的对话条数，用于"太早写总结会很空"的门槛 */
+const countTodayMessages = (history, at = new Date()) => {
+	const start = new Date(at.getFullYear(), at.getMonth(), at.getDate()).getTime();
+	const end = new Date(at.getFullYear(), at.getMonth(), at.getDate() + 1).getTime();
+	return (Array.isArray(history) ? history : []).filter((item) => {
+		const ts = Number(item?.ts);
+		return Number.isFinite(ts) && ts >= start && ts < end;
+	}).length;
+};
 const readTodayDiary = async () => {
     try {
         return diaryTextOnly(splitDiary(await readFile(diaryFileForDay(), "utf8")).body);
@@ -5116,10 +5148,16 @@ const ensureDailyDiary = async (trigger) => {
         return false;
     }
 };
-const writeDailySummary = async (petId) => {
+const writeDailySummary = async (petId, options = {}) => {
     if (diaryWriting) throw new Error("正在写日记");
     diaryWriting = true;
     try {
+        // 去重：今天已有「一日总结」就不再写（除非显式 force）。
+        // 手动按钮与 23:59 定时任务共用这一条守则，保证不会写两份。
+        if (options?.force !== true) {
+            const hit = await hasTodaySummary();
+            if (hit.exists) throw new Error("TODAY_SUMMARY_EXISTS:" + (hit.at || ""));
+        }
         const cfg = readAllConfig(configPaths);
         const found = findPetInstance(cfg, petId);
         if (!found) throw new Error("没有这只桌宠：" + petId);
@@ -5147,8 +5185,11 @@ const writeDailySummary = async (petId) => {
             (today ? "\n\n今天的日记内容：\n" + today : "");
         const generated = await generateChat(ctx, system, diaryHistory, prompt, [], configuredModel(found.conf, "chatModel"), [], "dsh-pet-summary");
         if (!generated.ok) throw new Error(generated.message ?? generated.reason);
-        await appendTodayDiary("一日总结", diaryTextOnly(generated.text), now);
-        return generated.text;
+        await appendTodayDiary(SUMMARY_TITLE, diaryTextOnly(generated.text), now);
+        return {
+            text: generated.text,
+            at: diaryTime(now)
+        };
     } finally {
         diaryWriting = false;
     }
@@ -7247,6 +7288,82 @@ if (rest === "diary") {
         };
     }
 }
+		if (rest === "diary/summary") {
+			const who = requirePet(url.searchParams, () => readAllConfig(configPaths), { surface: true });
+			if (!who.ok) return who.res;
+			const cfgS = readAllConfig(configPaths);
+			const foundS = findPetInstance(cfgS, who.petId);
+			const memS = await withMemoryLock(async () => readMemory());
+			const historyS = foundS ? (memS[foundS.entry]?.[who.petId]?.messages ?? []) : [];
+			const messages = countTodayMessages(historyS);
+			if (method === "GET") {
+				const hit = await hasTodaySummary();
+				return {
+					kind: "json",
+					status: 200,
+					obj: {
+						ok: true,
+						exists: hit.exists,
+						at: hit.at ?? null,
+						messages,
+						minMessages: 4
+					}
+				};
+			}
+			if (method !== "POST") return {
+				kind: "json",
+				status: 405,
+				obj: { error: "method not allowed" }
+			};
+			const minMessages = 4;
+			if (messages < minMessages) return {
+				kind: "json",
+				status: 200,
+				obj: { ok: false, reason: "too-early", messages, minMessages }
+			};
+			try {
+				const result = await writeDailySummary(who.petId);
+				const stateS = await readDiaryState();
+				await writeDiaryState({
+					...stateS,
+					summaryDate: diaryDateKey(),
+					summaryStatus: "written-manual",
+					summaryAt: new Date().toISOString()
+				});
+				diaryLog("[日记系统] 手动一日总结已写入 at=" + String(result?.at ?? ""));
+				return {
+					kind: "json",
+					status: 200,
+					obj: {
+						ok: true,
+						at: result?.at ?? null,
+						text: result?.text ?? ""
+					}
+				};
+			} catch (error) {
+				const message = String(error?.message ?? error);
+				const dup = /^TODAY_SUMMARY_EXISTS:(.*)$/.exec(message);
+				if (dup) {
+					diaryLog("[日记系统] 手动一日总结被拒：今日已存在 at=" + (dup[1] || ""));
+					return {
+						kind: "json",
+						status: 200,
+						obj: { ok: false, reason: "summary-exists", at: dup[1] || null }
+					};
+				}
+				if (message === "正在写日记") return {
+					kind: "json",
+					status: 200,
+					obj: { ok: false, reason: "busy" }
+				};
+				diaryLog("[日记系统] 手动一日总结失败：" + message);
+				return {
+					kind: "json",
+					status: 200,
+					obj: { ok: false, reason: "generate-error", message }
+				};
+			}
+		}
 		if (rest === "prompt") {
 			if (method !== "GET") return {
 				kind: "json",
@@ -8402,6 +8519,9 @@ ctx.effect(() => {
                             await deleteTodayDiary(now);
                             await writeDiaryState({ ...state, summaryDate: key, summaryStatus: "skipped-no-chat", summaryAt: now.toISOString() });
                             console.log("[dsh-pet] 今日无对话，跳过一日总结并删除当天日记");
+                        } else if ((await hasTodaySummary()).exists) {
+                            await writeDiaryState({ ...state, summaryDate: key, summaryStatus: "skipped-duplicate", summaryAt: now.toISOString() });
+                            console.log("[dsh-pet] 今日已有一日总结（手动写入），跳过定时总结");
                         } else {
                             await writeDiaryState({ ...state, summaryDate: key, summaryStatus: "generating", summaryAt: now.toISOString() });
                             try {
