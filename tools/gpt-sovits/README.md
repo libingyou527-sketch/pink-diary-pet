@@ -83,3 +83,26 @@ python   D:\tools\miniconda3\envs\GPT\python.exe     （start.ps1 顶部）
 ```
 
 环境变量可覆盖：`DSH_GSV_PYTHON` / `DSH_GSV_REPO` / `DSH_GSV_AUTOSTART`。
+
+## 已踩的坑：♪ 会让接口 400（2026-11-18 定位并修复）
+
+`api_v2.py` 在合成前会 `print()` 出目标文本。Windows 上 python 的 stdout 默认是 **GBK**，
+文本里一旦出现 `♪`（U+266A）就会抛：
+
+```text
+'gbk' codec can't encode character '\u266a' in position N
+```
+
+接口于是返回 **400 / 500**，表现为"QQ/桌宠里怎么都不出声"，而纯文本能正常合成。
+这个角色说话几乎每句带 ♪，所以失败率接近 100%。
+
+**修复**：启动时强制 UTF-8 环境。
+
+```text
+PYTHONIOENCODING=utf-8
+PYTHONUTF8=1
+PYTHONLEGACYWINDOWSSTDIO=0
+```
+
+插件 spawn（`lib/index.js` 的 `ensureGsvRunning`）与 `start.ps1` 都已加上。
+验证：修复前「你好呀♪」→ 400；修复后 → 200；失败原文（61 字含 ♪ 与（））→ 200 / 1MB。
