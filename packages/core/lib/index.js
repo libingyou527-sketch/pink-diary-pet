@@ -700,6 +700,16 @@ async function generateChat(ctx, system, history, userText, pool = [], preferred
 		const result = await generateWith(ctx, llm, sel, system, history, userText, pool, imageList, sessionId);
 		if (result.ok) return result;
 		last = result;
+		// 失败时落一行日志（纯文本），便于区分"配置模型失败"与"默认模型失败"
+		try {
+			const line = new Date().toISOString() + " attempt=" + modelLabel(sel) +
+				" ok=false reason=" + String(result.reason ?? "") +
+				" message=" + String(result.message ?? "").slice(0, 300) +
+				" sessionId=" + String(sessionId) + "\n";
+			const dir = join(resolveDshHome(), "xilian", "pet");
+			mkdirSync(dir, { recursive: true });
+			appendFileSync(join(dir, "chat-debug.log"), line);
+		} catch {}
 		if (i + 1 < candidates.length) console.warn(`dsh-pet: 对话用 ${modelLabel(sel)} 生成失败（${result.message ?? result.reason}），回落到 ${modelLabel(candidates[i + 1])}`);
 	}
 	return last;
