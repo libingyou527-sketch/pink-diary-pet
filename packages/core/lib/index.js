@@ -1,7 +1,7 @@
 import { createReadStream, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { appendFileSync } from "node:fs";
 import { connect as netConnect } from "node:net";
-import { mkdir, readdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, normalize, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -5084,8 +5084,13 @@ const cleanupBlankYesterdayDiary = async (reason) => {
 		let body = "";
 		try {
 			body = splitDiary(await readFile(file, "utf8")).body.trim();
-		} catch {
-			result = "absent";
+		} catch (error) {
+			if (error?.code === "ENOENT") {
+				result = "absent";
+			} else {
+				result = "read-failed";
+				diaryLog("[日记系统] 昨日文件读取失败：" + String(error?.message ?? error));
+			}
 		}
 		if (result !== "absent") {
 			if (body !== "") {
