@@ -52,7 +52,11 @@ assets/**/*.png
 assets/emojis/
 
 # Local media tools (ffmpeg 二进制等，不上传)
-tools/
+# 例外：GPT-SoVITS 的启停脚本要进版本库（纯文本，无二进制），
+# 所以先把 tools/ 降级为 tools/*，再单独放行 tools/gpt-sovits/
+tools/*
+!tools/gpt-sovits/
+!tools/gpt-sovits/*
 
 # OS/editor
 .DS_Store
