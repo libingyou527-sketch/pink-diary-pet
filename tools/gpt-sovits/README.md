@@ -12,7 +12,7 @@ DSH 启动 → 插件加载 → 探测 9880
   └─ 没起来   → detached + windowsHide 拉起，日志 "spawned pid=..."
 ```
 
-日志：`C:\Users\lby16\.dsh\xilian-tts\gpt-sovits.log`
+日志：`%USERPROFILE%\.dsh\xilian-tts\gpt-sovits.log`
 状态：`GET http://127.0.0.1:<DSH端口>/dsh-tts-api/gsv-status`
 
 ## 空闲会分两级处理（2026-11-18 新增）
@@ -79,7 +79,7 @@ python   D:\tools\miniconda3\envs\GPT\python.exe     （start.ps1 顶部）
 插件的自动启动读的是另一份配置（两者要一起改）：
 
 ```text
-C:\Users\lby16\.dsh\tts-gsv\settings.json → launcher.{python,repo,port,idleStopMinutes,startWaitSeconds}
+%USERPROFILE%\.dsh\tts-gsv\settings.json → launcher.{python,repo,port,idleStopMinutes,startWaitSeconds}
 ```
 
 环境变量可覆盖：`DSH_GSV_PYTHON` / `DSH_GSV_REPO` / `DSH_GSV_AUTOSTART`。
