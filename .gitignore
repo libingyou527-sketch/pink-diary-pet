@@ -57,6 +57,8 @@ assets/emojis/
 tools/*
 !tools/gpt-sovits/
 !tools/gpt-sovits/*
+!tools/dsh/
+!tools/dsh/*
 
 # OS/editor
 .DS_Store
