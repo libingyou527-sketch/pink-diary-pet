@@ -75,3 +75,36 @@ host voice route failed ..., falling back to direct gsv   warn
 A. 向上游提 PR，让 pet 模式的语音走可配置的 HTTP endpoint
 B. 不用它的 pet 模式，我们自己维护一个 gateway（工作量大）
 ```
+
+## 补丁 4：语音链路纯文本诊断日志（2026-11-18）
+
+**背景**：QQ 语音长期不出声。宿主路由与直连两条路都验证过"用正确构造的请求能 200"，
+但 GPT-SoVITS 服务端日志里出现 10 次 `POST /tts 400`，报错是 `text_lang` 为 None、
+且"实际输入的目标文本"为空——说明某个调用方发了空 text。光看服务端日志无法确定是谁。
+
+**改法**（只记录，不做任何匹配判断）：
+
+```text
+logVoice(msg) 追加写 ~/.dsh/qqbot/voice.log，ISO 时间戳 + 一行描述
+
+记录点：
+  synth begin textLen=<n> hostOrigin=<url|(none)>
+  host route ok url=… bytes=…
+  host speak http=<status>
+  host speak no url body=…
+  host audio fetch failed http=<status>
+  host route threw: <error>
+  direct fallback base=<url> textLen=<n>
+  direct fallback response=<status>
+```
+
+**用法**：在 QQ 里发一句"发个语音"，然后看 `~/.dsh/qqbot/voice.log`：
+
+```text
+只有 synth begin + host route ok        → 宿主路由成功，问题在发送端（bot.sendVoice）
+有 host … failed/threw + direct …       → 宿主路由挂了，看具体原因
+direct fallback textLen=0               → 调用方传了空文本（就是那 10 次 400）
+没有 synth begin                        → voice 没到 true，模型没打标签
+```
+
+**注意**：这是临时诊断，定位后应当删除（或保留也行，每次语音只多一行）。
