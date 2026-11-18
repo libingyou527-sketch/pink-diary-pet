@@ -439,3 +439,56 @@ assets/webm/（我们真实的库）
 - fork 后的 exe 体积直接省约 96MB
 - "要不要动作库"这个问题被消解：真正的动作库只有 19 个，一直保留
 ```
+
+### 10.7 F2 执行记录（2026-11-18 18:20 完成）
+
+```text
+已建包      packages/core/  （79.5MB：lib 1MB + runtime 0.3MB + assets 78MB）
+包名        dsh-pet → dsh-xilian-core (v0.1.0)
+bin         dsh-pet-standalone → xilian-core
+bundle id   dsh-pet → dsh-xilian-core（YAML 校验通过）
+部署        scripts/install.mjs 改为整包部署 packages/core → node_modules/dsh-xilian-core
+            （并修复了 link: 依赖下 cpSync src==dest 报错）
+profile     依赖新增 dsh-xilian-core(link:)，bundles 用新包替换 dsh-pet
+            dsh-pet 依赖保留未删 → 回退只需把 bundles 改回去
+git         提交 d7bdfde（208 文件 / 8MB）
+            媒体资产（emojis/webm/fonts/memes/pic）按既有策略不入库
+```
+
+**前端已在包内**：`lib/client.js` + `exports["./client"]` + `dsh.client.platform = "web"`，
+DSH 会以 `/plugins/dsh-xilian-core/client.js` 提供给页面。
+
+**待验证**：重启 DSH 后确认插件加载、桌宠出现、路由前缀仍为 `/dsh-pet-7340`（未改，降低风险）。
+
+**回退方法**：把 profile 的 `dsh.profile.bundles` 里的 `dsh-xilian-core` 改回 `dsh-pet`，重启即可。
+
+### 10.8 F2 结果（2026-11-18 18:35）
+
+**状态：成功上线。** 前端与宿主均已并入 `dsh-xilian-core`，实测聊天、表情、语音全部通过。
+
+落地要点（与计划的差异）：
+
+```text
+1. 没有建 D:\tools\Xilian-Pet 新仓库，直接在 pink-diary-pet/packages/core 做
+2. profile 里用 link: 依赖 → pnpm 生成 Junction
+   - 代价：ESM 按 realpath 解析，包内必须自带运行时依赖
+3. 官方 dsh-pet 从 dependencies 移除（它仍在 bundles 之外也会被当作 client bundle 扫描，
+   造成 duplicate factory 冲突）
+4. 保持 ROUTE_PREFIX=/dsh-pet-7340 不变，数据目录也不变 → 回退成本极低
+```
+
+三个失败根因见 PROJECT_STATUS §15.2。教训：
+
+```text
+- fork 一个"发行版包"时，bundle 内的硬编码 id 必须一起改
+- 依赖声明要跟真实 import 对齐（ws 这种"靠别人提升"的最容易漏）
+- 寄生在宿主里的 peer 依赖，本地一份反而有害
+```
+
+后续（未做）：
+
+```text
+F3.5 TTS 折入 core（当前仍由 @memef1f1y/dsh-plugin-tts 提供 gptsovits provider）
+F3.6 memory/diary 的路由并入 core（当前仍由两个独立 UI 插件提供）
+收尾  定位稳定后可将自诊断入口换回普通入口（也可保留，代价仅每次启动 7 行日志）
+```
