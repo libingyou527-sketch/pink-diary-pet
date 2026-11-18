@@ -7685,6 +7685,98 @@ if (rest === "diary") {
 		}
 	}), "dsh-xilian-core: /dsh-tts-api/gsv-stop");
 	ctx.effect(() => ctx.webServer.register({
+		kind: "exact",
+		path: "/dsh-tts-api/gsv-start",
+		handler: async (req, res) => {
+			if (req.method !== "POST") {
+				sendJson(res, 405, { ok: false, error: "use POST" });
+				return;
+			}
+			try {
+				const url = new URL(req.url ?? "/", "http://localhost");
+				const wait = url.searchParams.get("wait") === "1" || url.searchParams.get("wait") === "true";
+				const cfg = readGsvLauncher();
+				const startedAt = Date.now();
+				if (await probeTcp(cfg.port)) {
+					gsvState.listening = true;
+					sendJson(res, 200, { ok: true, ready: true, waitedSeconds: 0, reason: "already-listening", port: cfg.port });
+					return;
+				}
+				if (!cfg.autoStart) {
+					sendJson(res, 200, { ok: false, ready: false, reason: "autoStart-disabled", port: cfg.port });
+					return;
+				}
+				await ensureGsvRunning();
+				if (!wait) {
+					sendJson(res, 200, { ok: true, starting: true, port: cfg.port, childPid: gsvState.childPid });
+					return;
+				}
+				// 有界等待：最多 max(30, waitSeconds)，硬上限 180s
+				const limit = Math.min(Math.max(30, cfg.waitSeconds), 180);
+				const deadline = Date.now() + limit * 1000;
+				while (Date.now() < deadline) {
+					await new Promise((resolveWait) => setTimeout(resolveWait, 2000));
+					if (await probeTcp(cfg.port)) {
+						gsvState.listening = true;
+						gsvState.lastReadyAt = Date.now();
+						const waited = Math.round((Date.now() - startedAt) / 1000);
+						appendGsvLog("gsv-start: ready after " + waited + "s");
+						sendJson(res, 200, { ok: true, ready: true, waitedSeconds: waited, port: cfg.port, childPid: gsvState.childPid });
+						return;
+					}
+				}
+				const waited = Math.round((Date.now() - startedAt) / 1000);
+				appendGsvLog("gsv-start: timeout after " + waited + "s (" + (gsvState.lastError || "port not open") + ")");
+				sendJson(res, 200, { ok: false, ready: false, reason: "timeout", waitedSeconds: waited, error: gsvState.lastError, port: cfg.port, childPid: gsvState.childPid });
+			} catch (error) {
+				sendJson(res, 500, { ok: false, error: String(error?.message ?? error) });
+			}
+		}
+	}), "dsh-xilian-core: /dsh-tts-api/gsv-start");
+	// ---- 右键菜单：语音服务（走第三方菜单注册表，前端零改动）----
+	// 菜单里会出现在「更多」下的一个「语音服务」子菜单，两项分别对应停/启。
+	const GSV_MENU_OWNER = "语音服务";
+	const GSV_MENU_START = "恢复语音";
+	const GSV_MENU_STOP = "释放显存";
+	ctx.effect(() => {
+		let disposed = false;
+		const publish = () => {
+			menuRegistry.register({ owner: GSV_MENU_OWNER, labels: [GSV_MENU_START, GSV_MENU_STOP] });
+			state.writeSection("menu", { items: menuRegistry.snapshot() });
+		};
+		try {
+			publish();
+			appendGsvLog("menu: registered 「" + GSV_MENU_OWNER + "」");
+		} catch (error) {
+			console.warn("[xilian] 语音菜单注册失败（不影响其他功能）：" + String(error?.message ?? error));
+		}
+		const loop = async () => {
+			while (!disposed) {
+				let hit = null;
+				try {
+					hit = await menuRegistry.poll(GSV_MENU_OWNER, 15000);
+				} catch {
+					break;
+				}
+				if (disposed || !hit) continue;
+				if (hit[GSV_MENU_STOP] != null) {
+					void stopGsv();
+				}
+				if (hit[GSV_MENU_START] != null) {
+					void ensureGsvRunning();
+				}
+			}
+		};
+		void loop();
+		return () => {
+			disposed = true;
+			try {
+				menuRegistry.clear(GSV_MENU_OWNER);
+				state.writeSection("menu", { items: menuRegistry.snapshot() });
+			} catch {}
+		};
+	}, "dsh-xilian-core: 语音服务菜单");
+	ctx.effect(() => ctx.webServer.register({
 		kind: "prefix",
 		path: ROUTE_PREFIX,
 		handler: async (req, res) => {
