@@ -5045,6 +5045,81 @@ const hasConversationToday = (history, at = new Date()) => {
         return Number.isFinite(ts) && ts >= start && ts < end;
     });
 };
+/**
+ * 某一天（本地时区）是否有任何宠物的对话消息。
+ * 与 hasConversationToday 的区别：那个只看单个 history 数组，这里跨全部条目/宠物。
+ */
+const hasConversationOnDay = async (at) => {
+	const start = new Date(at.getFullYear(), at.getMonth(), at.getDate()).getTime();
+	const end = new Date(at.getFullYear(), at.getMonth(), at.getDate() + 1).getTime();
+	const mem = await readMemory();
+	for (const entry of Object.values(mem ?? {})) {
+		if (!entry || typeof entry !== "object") continue;
+		for (const bucket of Object.values(entry)) {
+			if (!bucket || typeof bucket !== "object" || !Array.isArray(bucket.messages)) continue;
+			if (bucket.messages.some((item) => {
+				const ts = Number(item?.ts);
+				return Number.isFinite(ts) && ts >= start && ts < end;
+			})) return true;
+		}
+	}
+	return false;
+};
+/**
+ * 启动时清理"昨天留下的空白日记"。
+ * 判据三条同时成立才删：文件存在 + 正文为空 + 昨天没有任何对话。
+ * 空白但昨天有对话 → 保留（说明只是没写成，留个痕迹）。
+ * 每天只跑一次（state.blankCleanupDate 记忆）。
+ */
+const cleanupBlankYesterdayDiary = async (reason) => {
+	try {
+		const now = new Date();
+		const todayKey = diaryDateKey(now);
+		const state = await readDiaryState();
+		if (state.blankCleanupDate === todayKey) return false;
+		const yesterday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
+		const file = diaryFileForDay(yesterday);
+		const dayKey = diaryDateKey(yesterday);
+		let result = "absent";
+		let body = "";
+		try {
+			body = splitDiary(await readFile(file, "utf8")).body.trim();
+		} catch {
+			result = "absent";
+		}
+		if (result !== "absent") {
+			if (body !== "") {
+				result = "kept-content";
+			} else if (await hasConversationOnDay(yesterday)) {
+				result = "kept-chat";
+			} else {
+				try {
+					await queueDiaryWrite(async () => {
+						await unlink(file);
+					});
+					diaryCache = {
+						at: 0,
+						text: ""
+					};
+					result = "deleted";
+				} catch (error) {
+					result = "delete-failed";
+				}
+			}
+		}
+		await writeDiaryState({
+			...state,
+			blankCleanupDate: todayKey,
+			blankCleanupAt: now.toISOString(),
+			blankCleanupResult: result
+		});
+		diaryLog("[日记系统] 昨日空白清理 runner=" + reason + " date=" + dayKey + " 结果=" + result);
+		return result === "deleted";
+	} catch (error) {
+		diaryLog("[日记系统] 昨日空白清理异常：" + String(error?.message ?? error));
+		return false;
+	}
+};
 const DIARY_STATE_PATH = join(userRoot, "daily-diary.json");
 const readDiaryState = async () => {
     try {
@@ -8554,6 +8629,7 @@ ctx.effect(() => {
     diaryLog("[日记系统] 启动检查定时器已设置（3.5 秒后执行）");
     const timer = setTimeout(() => {
         void ensureDailyDiary("启动");
+		void cleanupBlankYesterdayDiary("启动");
     }, 3500);
     return () => clearTimeout(timer);
 }, "dsh-pet: daily diary startup");
@@ -8574,6 +8650,7 @@ ctx.effect(() => {
                 if (lastDate !== key) {
                     lastDate = key;
                     await ensureDailyDiary("00:01");
+				await cleanupBlankYesterdayDiary("00:01");
                 }
             }
         } catch (error) {
