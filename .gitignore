@@ -65,8 +65,8 @@ Thumbs.db
 .idea/
 
 # ---- fork 包（packages/core）的媒体资产：不入库，由 scripts/install.mjs 从本地复制 ----
+# 例外：assets/pic/ 是 UI 图标（通知图标、光标），体积小且是我们自己的美术，必须入库
 packages/core/assets/emojis/
 packages/core/assets/webm/
 packages/core/assets/fonts/
 packages/core/assets/memes/
-packages/core/assets/pic/
