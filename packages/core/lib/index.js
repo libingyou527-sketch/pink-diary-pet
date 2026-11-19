@@ -17,6 +17,7 @@ import { createMemoryBlockStore } from "./memory-blocks.js";
 import { createStructuredSummaryWorker } from "./memory-summary.js";
 import { prepareStructuredContext } from "./memory-context.js";
 import { executeMemoryTool, parseMemoryToolMarkers, buildMemoryToolPrompt } from "./memory-tools.js";
+import { DIARY_TOOL_PROMPT, parseDiaryMarkers, searchDiary, readDiaryEntry, resolveDayKey, formatDiarySearch, formatDiaryRead } from "./diary-tools.js";
 import { createVideoStoryboard } from "./video-storyboard.js";
 
 //#region src/host/balance/internal.ts
@@ -4710,6 +4711,7 @@ const buildScopeSystem = async ({ scope, found, petId = "", groupId = null, send
     // scope 权限、群友资料、日记、时间都不得进入这里；它们统一追加到 user message。
     const staticBase = petChatStatic(found) + identitySuffix() +
         (memoryBlockStore ? "\n\n" + buildMemoryToolPrompt() : "") +
+        "\n\n" + DIARY_TOOL_PROMPT +
         behaviorRulesText().text;
     return staticBase;
 };
@@ -4814,28 +4816,57 @@ const generateChatWithMemory = async ({ system, history, text, pool, images, fou
         if (!generated.ok) return generated;
         generated = stripVideoMarker(generated);
     }
-    if (!memoryBlockStore || !Array.isArray(memoryScopes) || memoryScopes.length === 0) return stripVideoMarker(generated);
-    // 两轮工具：search 之后通常还要 decompress 才能取到原文（如"第一句话"）。
+    const canMemory = Boolean(memoryBlockStore) && Array.isArray(memoryScopes) && memoryScopes.length > 0;
+    // 日记只对主人私聊/本地开放；群聊与他人私聊一律不执行。
+    const canDiary = Array.isArray(memoryScopes) && memoryScopes.includes("owner");
+    if (!canMemory && !canDiary) return stripVideoMarker(generated);
+    // 两轮工具：search 之后通常还要 decompress/read 才能取到原文（如"第一句话"）。
     let lastResults = [];
     for (let round = 0; round < 2; round += 1) {
-        const calls = parseMemoryToolMarkers(generated.text);
-        if (calls.length === 0) break;
+        const memCalls = parseMemoryToolMarkers(generated.text);
+        const diaryCalls = parseDiaryMarkers(generated.text);
+        if (memCalls.length === 0 && diaryCalls.length === 0) break;
         const results = [];
-        for (const call of calls.slice(0, 2)) {
+        for (const call of memCalls.slice(0, 2)) {
             results.push(await executeMemoryTool(call.name, call.args, { store: memoryBlockStore, scopes: memoryScopes }));
+        }
+        // 硬上限：单轮最多 1 次日记查询（成本兜底，不是行为限制）。
+        if (diaryCalls.length > 0) {
+            if (!canDiary) {
+                results.push("diary: 这里是公开或他人私聊场合，不能翻主人的日记。");
+            } else {
+                const call = diaryCalls[0];
+                try {
+                    const entries = await readDiaryFiles();
+                    if (call.name === "search_diary") {
+                        results.push(formatDiarySearch(searchDiary(entries, call.args.keyword), call.args.keyword));
+                    } else {
+                        const dayKey = resolveDayKey(call.args.when);
+                        results.push(formatDiaryRead(readDiaryEntry(entries, dayKey)));
+                    }
+                    try {
+                        appendFileSync(join(userRoot, "diary-tool.log"),
+                            JSON.stringify({ at: new Date().toISOString(), action: call.name, arg: call.args.keyword ?? call.args.when }) + "\n",
+                            "utf8");
+                    } catch {}
+                } catch (error) {
+                    results.push("diary: 翻本子的时候出错了（" + String(error?.message ?? error) + "）");
+                }
+            }
         }
         lastResults = results;
         const hint = round === 0
-            ? "\n如果还需要确认某个 block 的原文，现在可以再输出一次 [[decompress_old_memory: b<id>]]；这是最后一次工具机会。"
+            ? "\n如果还需要确认原文，现在可以再输出一次 [[decompress_old_memory: b<id>]] 或 [[read_diary: 日期]]；这是最后一次工具机会。"
             : "\n现在工具结果已经返回。请直接用自然语言回答用户当前问题；不要输出任何工具标记，也不要再请求工具。不要编造结果里没有的内容。";
-        currentText += "\n\n【旧记忆工具结果】\n" + results.join("\n\n") + hint;
+        currentText += "\n\n【工具结果】\n" + results.join("\n\n") + hint;
         generated = await generateChat(ctx, system, history, currentText, pool, model, imageList);
         if (!generated.ok) return generated;
     }
     const finalText = String(generated.text ?? "");
-    if (parseMemoryToolMarkers(finalText).length > 0 || VIDEO_STORYBOARD_MARKER_RE.test(finalText)) {
+    if (parseMemoryToolMarkers(finalText).length > 0 || parseDiaryMarkers(finalText).length > 0 || VIDEO_STORYBOARD_MARKER_RE.test(finalText)) {
         const cleaned = finalText
             .replace(/\[\[\s*(?:search|decompress)_old_memory\s*:[^\]]*\]\]/gi, "")
+            .replace(/\[\[\s*(?:search|read)_diary\s*:[^\]]*\]\]/gi, "")
             .replace(VIDEO_STORYBOARD_MARKER_RE, "")
             .replace(/\n{3,}/g, "\n\n")
             .trim();
