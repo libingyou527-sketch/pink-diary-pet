@@ -98,9 +98,12 @@ export async function prepareStructuredContext({
     // Cheap deterministic fallback: surface the best matching block previews
     // even before the model has a tool loop. The full raw text remains behind
     // search/decompress and is never injected here.
+    // 命中预览随当前问题变化，绝不能放进 system（会让每轮缓存前缀失效）；
+    // 交给调用方拼到 user 消息尾部，system 只在压缩时变化。
+    let dynamicText = "";
     const hits = await store.search({ scopes: allowedScopes, query: currentText, limit: 3 });
     if (hits.length > 0) {
-        nextSystem = nextSystem + "\n\n【当前问题的旧记忆命中】\n" + hits.map((hit) => {
+        dynamicText = "\n\n【旧记忆命中】\n" + hits.map((hit) => {
             const label = hit.kind === "block" ? "块 " + hit.blockId : "消息 " + hit.ref + "（块 " + hit.blockId + "）";
             return "- " + label + "：" + hit.preview;
         }).join("\n");
@@ -114,7 +117,8 @@ export async function prepareStructuredContext({
         history: nextHistory,
         scopes: allowedScopes,
         createdBlockId: created?.id ?? null,
-        compressed: created !== null || existing.length > 0
+        compressed: created !== null || existing.length > 0,
+        dynamicText
     };
 }
 
