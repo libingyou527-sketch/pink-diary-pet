@@ -3325,9 +3325,11 @@ const chatTail = (now = new Date(), emojiText = "") => {
 	// 发声自检放在最靠近生成点的位置（user 尾部）：模型对紧邻的指令更敏感，
 	// 而 system 里的同类要求会被长上下文稀释。这一行只进 prompt，不入记忆。
 	const voiceCheck = "\n[发声自检：如果这条回复是想让主人听见声音的，就在最后单独写一行 [语音]；不写就只有文字]";
+	// 篇幅要求放尾部：数字与"说完就停"是可执行条件，静态 prompt 里的软措辞压不住。
+	const lengthCheck = "\n[篇幅] 1~2 句、40 字以内；说完就停，不复述我说过的话，不为显得热情堆语气词，也不分段。只有我明确让你讲故事、唱歌或展开说明时才写长。";
 	// 表达方式要求放在 user 尾部（最靠近生成点）：静态准则里不再重复这一条。
 	const expressCheck = "\n[表达方式] 必须选用标点符号（如 ~、！？、...... 等）和 [表情:文件名] 中任一或任二来代替括号里的动作和心理描写。";
-	return "\n\n[当前系统时间：" + stamp + "]" + voiceCheck + expressCheck + String(emojiText || "");
+	return "\n\n[当前系统时间：" + stamp + "]" + voiceCheck + lengthCheck + expressCheck + String(emojiText || "");
 };
 
 
