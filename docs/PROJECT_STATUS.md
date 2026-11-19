@@ -1353,3 +1353,58 @@ GET  同一路由                        返回 { exists, at, messages, minMessa
 ~/.dsh/qqbot/voice.log 仍在（诊断日志，可删可留）
 ChatTTS / RVC 目录保留但已停用（无进程、无自启、无代码引用）
 ```
+
+## 25. 2026-11-19：结构化记忆上线 + 工作约定
+
+### 25.1 结构化记忆（memory blocks）
+
+之前写过但从未启用（配置里没有 `memoryBlocks` 键，`context-blocks.json` 从未生成）。
+本次修复三处并启用：
+
+```text
+① 测试路径   tests/memory-blocks.test.mjs 指向已不存在的 src/dsh-pet-host/*
+             → 改到 packages/core/lib/*，4/4 通过
+② 配置映射   config.js 只认扁平 memoryBlocksEnabled，文档写的是 memoryBlocks.enabled
+             → 两种都认（含 memoryBlocks.file）
+③ 上下文预算 contextWindow 原为 1,000,000（预算 800k）→ 永远不会压缩
+             → 改为 65,536（预算 52,428），当前历史 ~55k 即可触发
+```
+
+启用后实测：
+
+```text
+第一个 block   b1 ready / 208 条原文 / topic 自动取首条「你好呀」
+单轮输入       56,094 → 6,438 tokens（-88.5%）
+第一句话       从"翻不到"变成准确答出「你好呀」
+```
+
+### 25.2 工具链修复（6dbaf7b）
+
+```text
+· 标记循环 1 轮 → 2 轮：search 之后允许一次 decompress（取原文）
+· search_old_memory 结果附带命中块开头两条原文 → 常见问题一轮即可答
+```
+
+### 25.3 工作约定：验证即清理
+
+任何用 `/chat` 做的验证都会写入 `memory.json`（和真实聊天同一路径）。因此：
+
+```text
+1. 验证与清理必须同一个动作：验完立刻删除对应消息，不留给"稍后"
+2. 删除范围 = 本次所有测试提问及其紧随的回复
+3. 只保留一份"清理前"备份，用于回滚；旧的同类备份删除
+4. 回复里写明清除了多少条、剩余多少条
+5. 若是 QQ 侧验证，同样按相同规则清理（消息 source=qq）
+```
+
+历史教训：11-19 上午清过一次后，下午又连发多条验证却未清，导致 12 条测试对话混进真实记忆。
+
+### 25.4 当前配置快照
+
+```text
+contextWindow        65,536
+compressionRatio     0.8        → 预算 52,428
+memoryBlocks.enabled true
+memoryBlocksFile     ~/.dsh/xilian/pet/context-blocks.json
+summaryRatio         0.2（保留最近 80%，最老 20% 进 block）
+```
