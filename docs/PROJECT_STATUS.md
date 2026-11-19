@@ -1408,3 +1408,39 @@ memoryBlocks.enabled true
 memoryBlocksFile     ~/.dsh/xilian/pet/context-blocks.json
 summaryRatio         0.2（保留最近 80%，最老 20% 进 block）
 ```
+
+### 25.5 日记可自查询（2026-11-19，6f098a0）
+
+之前日记只能被动注入最近 3 篇（`DIARY_MAX_ENTRIES=3` / `DIARY_MAX_CHARS=360`），
+更早的问题只能靠猜。现在她可以自己翻：
+
+```text
+[[search_diary: 关键词]]      → 命中篇目：日期 + 摘要片段（最多 5 条）
+[[read_diary: 2026-11-18]]    → 当天全文（截断 2000 字；也接受 今天 / 昨天）
+```
+
+提示词是**允许式**的——"想查就查，不用问对方"，因为痛点正是她不能主动查。
+成本用机制兜底，不用行为限制：
+
+```text
+单轮 ≤1 次日记查询（硬上限）
+两步查询：search 便宜，read 才拉全文
+复用两轮工具循环，search → read 可串联
+调用日志 ~/.dsh/xilian/pet/diary-tool.log（action + 参数），用于统计查询率
+```
+
+权限：只有 `local` / `owner-private` 作用域执行；群聊与他人私聊返回一句拒绝，
+不读取日记。
+
+**实测（重启后）**
+
+```text
+问 11-18 日记     1.3s  未调工具（被动窗口内，直接答对）
+问 日记写过下雨吗  0.9s  未调工具（同上）
+问 10-27 日记     2.2s  触发 read_diary 2026-10-27，答出当天真实内容
+                         日志：{"action":"read_diary","arg":"2026-10-27"}
+```
+
+行为符合预期：**近几天的问题直接用注入内容答，更早的才翻本子**。
+
+**测试**：`tests/diary-tools.test.mjs` 4 pass（解析 / 今天昨天 / 关键词命中与未命中 / 截断与缺失日）。
