@@ -98,16 +98,10 @@ export async function prepareStructuredContext({
     // Cheap deterministic fallback: surface the best matching block previews
     // even before the model has a tool loop. The full raw text remains behind
     // search/decompress and is never injected here.
-    // 命中预览随当前问题变化，绝不能放进 system（会让每轮缓存前缀失效）；
-    // 交给调用方拼到 user 消息尾部，system 只在压缩时变化。
-    let dynamicText = "";
-    const hits = await store.search({ scopes: allowedScopes, query: currentText, limit: 3 });
-    if (hits.length > 0) {
-        dynamicText = "\n\n【旧记忆命中】\n" + hits.map((hit) => {
-            const label = hit.kind === "block" ? "块 " + hit.blockId : "消息 " + hit.ref + "（块 " + hit.blockId + "）";
-            return "- " + label + "：" + hit.preview;
-        }).join("\n");
-    }
+    // 不在这里做"按当前问题自动检索旧记忆"。
+    // 查询词每轮不同：放进 system 会每轮打断缓存前缀，放进 user 尾部又会让
+    // "她记得"退化成"手里被塞了搜索结果"、诱导主动翻旧账。
+    // 旧细节一律交给她自己用 search_old_memory / decompress_old_memory 去取。
 
     nextHistory = trimToBudget({ system: nextSystem, history: nextHistory, currentText, images, budget, countTokens });
     logger?.log?.("[memory-blocks] scope=" + primaryScope + " blocks=" + existing.length +
@@ -117,8 +111,7 @@ export async function prepareStructuredContext({
         history: nextHistory,
         scopes: allowedScopes,
         createdBlockId: created?.id ?? null,
-        compressed: created !== null || existing.length > 0,
-        dynamicText
+        compressed: created !== null || existing.length > 0
     };
 }
 

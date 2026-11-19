@@ -4982,7 +4982,7 @@ const buildChatContext = async ({ system, history, currentText, images = [], fou
                 countTokens: estimateTokens
             });
             const timedSystem = structured.system;
-            return { ...structured, system: timedSystem, compressed: true, summaryUsed: false, dynamicText: structured.dynamicText ?? "", estimatedTokens: estimateTokens(timedSystem) + estimateTokens(currentText) + estimateHistoryTokens(structured.history) + imageTokens };
+            return { ...structured, system: timedSystem, compressed: true, summaryUsed: false, estimatedTokens: estimateTokens(timedSystem) + estimateTokens(currentText) + estimateHistoryTokens(structured.history) + imageTokens };
         }
     }
     const turns = messagesToTurns(normalized);
@@ -5531,7 +5531,6 @@ const chatWithPetShared = async (petId, text, images = [], imagePaths = [], vide
         scope: "owner-private",
         memoryScopes: ["owner"]
     });
-    chatText += chatContext.dynamicText || "";
     const generated = await generateChatWithMemory({ system: chatContext.system, history: chatContext.history, text: chatText, pool: [], images: imageList, found, memoryScopes: chatContext.scopes ?? ["owner"], videos: [] });
     if (!generated.ok) throw new Error(generated.message ?? generated.reason);
     const final = finalizeEmojiReply(generated.text, text);
@@ -5603,7 +5602,6 @@ const chatWithPetQQ = async (petId, text, history, images = [], scopeInfo = {}, 
         scope,
         memoryScopes: memoryScopes
     });
-    chatText += chatContext.dynamicText || "";
     const generated = await generateChatWithMemory({ system: chatContext.system, history: chatContext.history, text: chatText, pool: [], images: imageList, found, memoryScopes, videos: [] });
     if (!generated.ok) throw new Error(generated.message ?? generated.reason);
     const final = finalizeEmojiReply(generated.text, text);
@@ -5905,7 +5903,6 @@ ctx.effect(() => {
 			scope: "local",
 			memoryScopes: ["owner"]
 		});
-		chatText += chatContext.dynamicText || "";
 		let generated;
 		const wantsScreen = needsScreenCapture(userText);
 		if (wantsScreen) {
