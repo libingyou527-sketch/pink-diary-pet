@@ -23,6 +23,10 @@ test("parses both diary markers", () => {
     assert.equal(calls[1].name, "read_diary");
     assert.equal(calls[1].args.when, "2026-11-18");
     assert.deepEqual(parseDiaryMarkers("没有标记"), []);
+    // 全角冒号也要认（中文模型常见写法）
+    const zh = parseDiaryMarkers("[[read_diary：2026-11-13]]");
+    assert.equal(zh.length, 1);
+    assert.equal(zh[0].args.when, "2026-11-13");
 });
 
 test("resolves 今天 / 昨天 / explicit dates", () => {
@@ -31,6 +35,8 @@ test("resolves 今天 / 昨天 / explicit dates", () => {
     assert.equal(resolveDayKey("昨天", now), "2026-11-18");
     assert.equal(resolveDayKey("2026-11-18", now), "2026-11-18");
     assert.equal(resolveDayKey("随便写的", now), "");
+    assert.equal(resolveDayKey("11-13", now), "2026-11-13");
+    assert.equal(resolveDayKey("11月13日", now), "2026-11-13");
 });
 
 test("searches by keyword and reports misses", () => {

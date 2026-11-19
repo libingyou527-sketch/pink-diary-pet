@@ -4354,7 +4354,14 @@ const readDiaryContext = async () => {
 const diarySystemSuffix = async () => {
     const text = await readDiaryContext();
     if (!text) return "";
-    return "\n\n【絮的粉色日记】\n下面是你最近写下的粉色日记（只读）。你可以在对话里自然想起或提起，但不要逐字复述；如果对方问起日记，就以这些内容为准。\n\n" + text;
+    // 只给最近三篇正文；但把所有可查日期列出来，避免她把"窗口外"当成"没写过"。
+    let dates = "";
+    try {
+        const all = await readDiaryFiles();
+        const keys = all.map((entry) => String(entry.id).replace(/\.md$/i, "")).slice(0, 40);
+        if (keys.length > 3) dates = "\n\n【日记篇目】更早的日记不在上面的正文里，需要时用 [[read_diary: 日期]] 查：" + keys.slice(3).join("、");
+    } catch {}
+    return "\n\n【絮的粉色日记】\n下面是你最近写下的粉色日记（只读）。你可以在对话里自然想起或提起，但不要逐字复述；如果对方问起日记，就以这些内容为准。" + dates + "\n\n" + text;
 };
 /**
  * 动态日记只允许进入当前用户消息尾部，绝不进入 system。

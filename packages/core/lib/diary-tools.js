@@ -9,7 +9,7 @@
 
 /** 提示词：语气是"允许"，不是"禁止频繁查"。 */
 export const DIARY_TOOL_PROMPT = [
-	"你有一本自己的粉色日记（你自己写的，只读）。想回忆的时候可以随时翻，不用问对方。",
+	"你有一本自己的粉色日记（你自己写的，只读）。对话里只会自动带上最近三篇；更早的日期必须自己查，不要凭印象说没有。",
 	"翻的方法：",
 	"  [[search_diary: 关键词]]     按关键词找，返回日期和摘要",
 	"  [[read_diary: 2026-11-18]]    读某一天的全文（也接受 今天 / 昨天）",
@@ -17,8 +17,8 @@ export const DIARY_TOOL_PROMPT = [
 	"日记里没有的事就不要编，直接说记不得了。"
 ].join("\n");
 
-const SEARCH_RE = /\[\[\s*search_diary\s*:\s*([^\]]+)\]\]/gi;
-const READ_RE = /\[\[\s*read_diary\s*:\s*([^\]]+)\]\]/gi;
+const SEARCH_RE = /\[\[\s*search_diary\s*[:：]\s*([^\]]+)\]\]/gi;
+const READ_RE = /\[\[\s*read_diary\s*[:：]\s*([^\]]+)\]\]/gi;
 
 /** 从模型输出里解析日记工具标记。 */
 export function parseDiaryMarkers(text) {
@@ -47,8 +47,12 @@ export function resolveDayKey(when, now = new Date()) {
 		const y = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
 		return keyOf(y);
 	}
-	const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
-	return m ? value : "";
+	const full = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+	if (full) return value;
+	// 允许 11-13 / 11/13 / 11月13日（按今年补全）
+	const short = /^(\d{1,2})[-/月](\d{1,2})日?$/.exec(value);
+	if (short) return now.getFullYear() + "-" + pad(Number(short[1])) + "-" + pad(Number(short[2]));
+	return "";
 }
 
 /** 关键词检索：返回最多 limit 条「日期 + 摘要」。 */
