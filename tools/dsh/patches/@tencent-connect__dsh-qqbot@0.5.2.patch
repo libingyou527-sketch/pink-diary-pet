@@ -1,0 +1,1256 @@
+diff --git a/dist/config.js b/dist/config.js
+index cc39029..e59f0b2 100644
+--- a/dist/config.js
++++ b/dist/config.js
+@@ -12,6 +12,18 @@ export const AccessControlSchema = Schema.object({
+ export const ConfigSchema = Schema.object({
+     appId: Schema.string().default('').description('QQ 机器人 AppID'),
+     appSecret: Schema.string().default('').description('QQ 机器人 AppSecret'),
++    petMode: Schema.boolean().default(false).description('纯路由：QQ 消息交给 dsh-pet，由桌宠回复'),
++    petId: Schema.string().default('main').description('petMode 下使用的 dsh-pet 实例 id'),
++    petWsPort: Schema.number().default(9527).description('petMode 本地 WebSocket 起始端口'),
++    petHistoryLimit: Schema.number().default(1000).description('传给桌宠的历史消息条数（默认加载全部，最多 1000 条）'),
++    sharedC2cIds: Schema.array(Schema.string()).default([]).description('与 dsh-pet 普通记忆共享的 QQ 私聊 openid 列表'),
++    inboundImageDir: Schema.string().default('').description('QQ 入站图片临时目录（空=~/.dsh/media/onebot/tmp/inbound_images）'),
++    inboundImageMaxWidth: Schema.number().default(800).description('入站图片最大宽度'),
++    inboundImageTimeoutMs: Schema.number().default(5000).description('入站图片下载+压缩超时(ms)'),
++    inboundImageFormat: Schema.union(['webp', 'jpeg']).default('webp').description('入站图片输出格式'),
++    inboundImageQuality: Schema.number().default(80).description('入站图片压缩质量'),
++    inboundImageMaxBytes: Schema.number().default(20971520).description('入站图片原始大小上限'),
++    qqMemoryPath: Schema.string().default('').description('QQ 专用记忆文件路径（空=~/.dsh/qqbot/pet-qq-memory.json）'),
+     provider: Schema.string().description('LLM provider name'),
+     model: Schema.string().description('Model name'),
+     preset: Schema.string().description('Agent preset id'),
+diff --git a/dist/gateway/bootstrap.js b/dist/gateway/bootstrap.js
+index 070f21e..34895dc 100644
+--- a/dist/gateway/bootstrap.js
++++ b/dist/gateway/bootstrap.js
+@@ -4,12 +4,24 @@ import { handleInbound, createOutboundHandler } from "../transport/index.js";
+ import { ReplyLimiter } from "../transport/reply-limiter.js";
+ import { cacheMsgId, cacheEventId } from "../transport/msgid-cache.js";
+ import { resolveReplyTarget, sendResolvedMarkdown } from "../transport/reply-target.js";
++import { chunkMarkdownText } from "../transport/chunker.js";
++import { PetBridge } from "../pet-bridge/server.js";
++import { QqMemory } from "../pet-bridge/memory.js";
++import { processInboundImage } from "../pet-bridge/image.js";
++import { appendFileSync, existsSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
++import { execFile } from "node:child_process";
++import { homedir, tmpdir } from "node:os";
++import { join } from "node:path";
+ import { QuestionChannel } from "../features/question-channel.js";
+ import { ApprovalChannel } from "../features/approval-channel.js";
+ import { decodeButtonData } from "../features/button-utils.js";
+ import { buildUserAgent } from "../shared/index.js";
+ import { setupMiddlewares } from "./middleware-setup.js";
+ import { startMediaCleanup } from "../media/media-cleaner.js";
++try {
++    appendFileSync(join(process.env.USERPROFILE || homedir(), ".dsh", "qqbot", "pet-inbound.log"), JSON.stringify({ ts: new Date().toISOString(), stage: "bootstrap-loaded" }) + "\n", "utf8");
++}
++catch {}
+ import { ensureVisionInputModal, registerDescribeImageTool } from "../media/vision-tool.js";
+ import { registerSendFileTool } from "../media/send-file-tool.js";
+ /**
+@@ -30,6 +42,268 @@ function dispatchInteraction(event, manager) {
+         return manager.approvalChannel?.handleInteraction(event) ?? false;
+     return false;
+ }
++/** GPT-SoVITS 语音配置（独立于已废弃的 ChatTTS/RVC 管线）。 */
++/** 宿主 origin：由 dsh-xilian-core 写入 ~/.dsh/qqbot/pet-host.json。
++ *  走宿主 /dsh-tts-api/speak 的好处：服务空闲休眠时会被自动唤醒，且日志统一可查。 */
++function readPetHostOrigin() {
++    try {
++        const file = join(homedir(), ".dsh", "qqbot", "pet-host.json");
++        const data = JSON.parse(readFileSync(file, "utf8"));
++        const origin = String(data && data.origin || "").replace(/\/+$/, "");
++        return /^https?:\/\//.test(origin) ? origin : "";
++    } catch {
++        return "";
++    }
++}
++
++function readGsvSettings() {
++    try {
++        const file = join(homedir(), ".dsh", "xilian", "tts", "settings.json");
++        const data = JSON.parse(readFileSync(file, "utf8"));
++        return data && typeof data === "object" ? data : {};
++    } catch {
++        return {};
++    }
++}
++
++/** GPT-SoVITS 端口可能调整；运行时探测 /tts 路由并缓存，避免写死端口。 */
++const GSV_ROUTE = "/tts";
++const GSV_DEFAULT_API = "http://127.0.0.1:9880";
++const GSV_DEFAULT_PORTS = [9880, 9881, 9882, 9883];
++let gsvBaseCache = null;
++
++function invalidateGsvBase() {
++    gsvBaseCache = null;
++}
++
++/** 列出本机 LISTEN 端口，区分“本进程 PID 持有”和“全部”（netstat 失败时返回空）。 */
++function localListeningPorts(pid) {
++    return new Promise((resolve) => {
++        try {
++            execFile("netstat", ["-ano", "-p", "tcp"], { windowsHide: true, timeout: 4000 }, (error, stdout) => {
++                const own = [];
++                const all = [];
++                const text = String(stdout || "");
++                if (text) {
++                    for (const line of text.split(/\r?\n/)) {
++                        const m = line.trim().match(/^TCP\s+\S+:(\d+)\s+\S+\s+LISTENING\s+(\d+)$/i);
++                        if (!m) continue;
++                        const port = Number(m[1]);
++                        const owner = Number(m[2]);
++                        if (!port) continue;
++                        if (!all.includes(port)) all.push(port);
++                        if (owner === pid && !own.includes(port)) own.push(port);
++                    }
++                }
++                if (error) console.debug?.("[pet] netstat failed: " + (error?.message ?? error));
++                resolve({ own, all });
++            });
++        } catch {
++            resolve({ own: [], all: [] });
++        }
++    });
++}
++
++/** 探测某个 base 是否挂着 GPT-SoVITS 的 /tts 路由：404=不是它，其余（405/400）=路由存在。 */
++async function isGsvBase(base) {
++    try {
++        const response = await fetch(base + GSV_ROUTE, {
++            method: "GET",
++            redirect: "manual",
++            signal: AbortSignal.timeout(1500)
++        });
++        return !(response.status === 404 || response.status === 426 || response.status === 502 || response.status === 503);
++    } catch {
++        return false;
++    }
++}
++
++/**
++ * 解析当前 GPT-SoVITS 的 API base。
++ * 顺序：环境变量 > tts-gsv 配置 > 常见端口 > 本进程监听端口 > 全部本地监听端口 > 默认值。
++ * 结果按进程生命周期缓存；调用失败时清缓存重探一次。
++ */
++async function resolveGsvBase(settings, logger) {
++    if (gsvBaseCache) return gsvBaseCache;
++    const envBase = String(process.env.DSH_GSV_API_URL || "").trim().replace(/\/+$/, "");
++    if (envBase) {
++        gsvBaseCache = envBase;
++        return gsvBaseCache;
++    }
++    const candidates = [];
++    const push = (value) => {
++        const base = String(value || "").trim().replace(/\/+$/, "");
++        if (base && !candidates.includes(base)) candidates.push(base);
++    };
++    push(settings?.apiUrl);
++    for (const port of GSV_DEFAULT_PORTS) push("http://127.0.0.1:" + port);
++    const { own, all } = await localListeningPorts(process.pid);
++    for (const port of own) push("http://127.0.0.1:" + port);
++    for (const port of all) push("http://127.0.0.1:" + port);
++    for (const base of candidates) {
++        if (await isGsvBase(base)) {
++            gsvBaseCache = base;
++            logger?.debug?.("[pet] gsv api resolved: " + base);
++            return base;
++        }
++    }
++    const fallback = String(settings?.apiUrl || GSV_DEFAULT_API).replace(/\/+$/, "");
++    logger?.warn?.("[pet] gsv api not resolved, fallback to " + fallback);
++    return fallback;
++}
++
++function wavDurationSeconds(buffer) {
++    try {
++        if (buffer.length < 44 || buffer.toString("ascii", 0, 4) !== "RIFF") return 0;
++        const channels = buffer.readUInt16LE(22);
++        const rate = buffer.readUInt32LE(24);
++        const bits = buffer.readUInt16LE(34);
++        const dataBytes = buffer.length - 44;
++        if (!channels || !rate || !bits) return 0;
++        return dataBytes / (channels * rate * (bits / 8));
++    } catch {
++        return 0;
++    }
++}
++
++/** 只保留要念的文字：剥离 [表情:xxx] 与 [语音] 标签（这两类标签永不进 TTS）。 */
++function stripSpeechTags(value) {
++    return String(value ?? "")
++        .replace(/\[表情[:：][^\]]*\]/g, " ")
++        .replace(/\[语音\]/g, " ")
++        .replace(/\s+/g, " ")
++        .trim();
++}
++
++async function synthesizePetVoice(text, config, logger, signal) {
++    const settings = readGsvSettings();
++    const spoken = stripSpeechTags(text);
++    if (!spoken) return null;
++    const refAudio = String(settings.refAudioPath || "").trim();
++    if (!refAudio) {
++        logger?.warn?.("[pet] gsv ref audio not configured");
++        return null;
++    }
++    // 优先走宿主统一入口：自动唤醒 + 统一日志。失败再退回直连 GSV。
++    const hostOrigin = readPetHostOrigin();
++    if (hostOrigin) {
++        try {
++            const res = await fetch(hostOrigin + "/dsh-tts-api/speak", {
++                method: "POST",
++                headers: { "content-type": "application/json", accept: "application/json" },
++                body: JSON.stringify({ text: spoken, provider: "gptsovits", voice: "gsv", custom: settings }),
++                signal: signal || AbortSignal.timeout(120000)
++            });
++            if (res.ok) {
++                const data = await res.json().catch(() => null);
++                const url = data && typeof data.url === "string" ? data.url : "";
++                if (url) {
++                    const audio = await fetch(hostOrigin + url, { signal: signal || AbortSignal.timeout(60000) });
++                    if (audio.ok) {
++                        const buffer = Buffer.from(await audio.arrayBuffer());
++                        if (buffer.length >= 44) {
++                            const hostFile = join(tmpdir(), "dsh-pet-voice-" + Date.now() + "-" + Math.random().toString(36).slice(2, 8) + ".wav");
++                            writeFileSync(hostFile, buffer);
++                            logger?.debug?.("[pet] voice via host route ok: " + url);
++                            return hostFile;
++                        }
++                    }
++                    logger?.warn?.("[pet] host audio fetch failed: http " + audio.status);
++                } else {
++                    logger?.warn?.("[pet] host speak returned no url: " + JSON.stringify(data));
++                }
++            } else {
++                logger?.warn?.("[pet] host speak http " + res.status);
++            }
++        } catch (error) {
++            logger?.warn?.("[pet] host voice route failed (" + (error?.message ?? error) + "), falling back to direct gsv");
++        }
++    }
++    const payload = JSON.stringify({
++        text: spoken,
++        text_lang: settings.textLang || "zh",
++        ref_audio_path: refAudio,
++        prompt_lang: settings.promptLang || "zh",
++        prompt_text: String(settings.promptText || ""),
++        text_split_method: settings.textSplitMethod || "cut5",
++        media_type: "wav",
++        streaming_mode: false,
++        speed_factor: Number.isFinite(Number(settings.speedFactor)) ? Number(settings.speedFactor) : 1.0,
++        top_k: Number.isFinite(Number(settings.topK)) ? Number(settings.topK) : 20,
++        top_p: Number.isFinite(Number(settings.topP)) ? Number(settings.topP) : 0.95,
++        temperature: Number.isFinite(Number(settings.temperature)) ? Number(settings.temperature) : 1.0,
++        repetition_penalty: Number.isFinite(Number(settings.repetitionPenalty)) ? Number(settings.repetitionPenalty) : 1.35,
++        seed: Number.isFinite(Number(settings.seed)) ? Number(settings.seed) : -1
++    });
++    const postTts = (base) => fetch(base + GSV_ROUTE, {
++        method: "POST",
++        headers: { "content-type": "application/json", accept: "audio/wav" },
++        body: payload,
++        signal: signal || AbortSignal.timeout(120000)
++    });
++    let api = await resolveGsvBase(settings, logger);
++    let response;
++    try {
++        response = await postTts(api);
++    } catch (error) {
++        // 端口可能变了：清缓存重新探测一次再重试。
++        invalidateGsvBase();
++        const retried = await resolveGsvBase(settings, logger);
++        if (retried === api) {
++            logger?.warn?.("[pet] voice synth failed: " + (error?.message ?? error));
++            return null;
++        }
++        api = retried;
++        try {
++            response = await postTts(api);
++        } catch (error2) {
++            logger?.warn?.("[pet] voice synth failed: " + (error2?.message ?? error2));
++            return null;
++        }
++    }
++    if (!response.ok) {
++        logger?.warn?.("[pet] gsv synth http " + response.status);
++        return null;
++    }
++    try {
++        const buffer = Buffer.from(await response.arrayBuffer());
++        if (buffer.length < 44) return null;
++        if (wavDurationSeconds(buffer) > 60) { logger?.warn?.("[pet] voice too long (" + Math.round(wavDurationSeconds(buffer)) + "s), skipped"); return null; }
++        const file = join(tmpdir(), "dsh-pet-voice-" + Date.now() + "-" + Math.random().toString(36).slice(2, 8) + ".wav");
++        writeFileSync(file, buffer);
++        return file;
++    } catch (error) {
++        logger?.debug?.("[pet] voice audio fetch skipped: " + (error?.message ?? error));
++        return null;
++    }
++}
++
++function stripQqTimestamp(value) {
++    return String(value ?? "")
++        .replace(/\[\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\]\s*/g, "")
++        .trim();
++}
++
++async function maybeSendPetVoice(bot, target, text, config, limiter, logger, timeoutMs = 120000) {    if (!text || !String(text).trim()) return false;
++    let file = null;
++    const controller = new AbortController();
++    const timer = setTimeout(() => controller.abort(new Error("voice-first timeout")), Math.max(1000, Number(timeoutMs) || 20000));
++    try {
++        file = await synthesizePetVoice(String(text), config, logger, controller.signal);
++        if (!file) return false;
++        await bot.sendVoice(resolveReplyTarget(target, limiter, false), { localPath: file });
++        logger?.debug?.("[pet] voice-first sent; text suppressed");
++        return true;
++    } catch (error) {
++        logger?.warn?.("[pet] voice-first failed, falling back to text: " + (error?.message ?? error));
++        return false;
++    } finally {
++        clearTimeout(timer);
++        if (file) {
++            try { unlinkSync(file); } catch {}
++        }
++    }
++}
+ export async function bootstrapGateway(ctx, agents, config, logger) {
+     const manager = new SessionManager(ctx, agents, config, logger);
+     // ── 初始化 QQ Bot SDK ──
+@@ -45,16 +319,112 @@ export async function bootstrapGateway(ctx, agents, config, logger) {
+     });
+     logger.info(`QQBot SDK initialized (UA: ${userAgent})`);
+     // ── 中间件链 ──
++    bot.use(async (ctx, next) => {
++        try { logInbound(ctx.message, { stage: "raw-before-middleware" }); } catch {}
++        await next();
++        try { logInbound(ctx.message, { stage: "after-middleware", stopped: ctx.stopped, reason: ctx.stopReason ?? null }); } catch {}
++    });
+     setupMiddlewares(bot, config, manager, logger);
+-    // ── 入站：经过中间件链后的消息交给 dsh agent ──
++    let petBridge = null;
++    let petMemory = null;
++    let petReplyLimiter = null;
++    if (config.petMode === true) {
++        const qqDir = join(process.env.USERPROFILE || homedir(), ".dsh", "qqbot");
++        const inboundImageDir = config.inboundImageDir || join(process.env.USERPROFILE || homedir(), ".dsh", "media", "onebot", "tmp", "inbound_images");
++        petReplyLimiter = new ReplyLimiter({ limit: 4 });
++        petMemory = new QqMemory(config.qqMemoryPath || join(qqDir, "pet-qq-memory.json"), { limit: 1000, logger });
++        await petMemory.load();
++        petBridge = new PetBridge({
++            port: Number(config.petWsPort) || 9527,
++            portCount: 10,
++            discoveryPath: join(qqDir, "pet-bridge.json"),
++            logger,
++            sendReply: async (target, text, emojiPath, voice) => {
++                text = stripQqTimestamp(text);
++                if (voice === true) {
++                    const voiceTimeout = Number(config.voiceFirstTimeoutMs) || 120000;
++                    const voiceSent = await maybeSendPetVoice(bot, target, text, config, petReplyLimiter, logger, voiceTimeout);
++                    if (voiceSent) {
++                        // 私聊保留表情图；群聊成功时只发语音。
++                        if (target.scope !== "group" && emojiPath && existsSync(emojiPath)) {
++                            try {
++                                await bot.sendImage(resolveReplyTarget(target, petReplyLimiter, false), { localPath: emojiPath });
++                                logger?.debug?.("[pet] emoji image sent after voice: " + emojiPath);
++                            } catch (error) {
++                                logger?.warn?.("[pet] emoji image send failed: " + (error?.message ?? error));
++                            }
++                        }
++                        return;
++                    }
++                }
++                const chunks = chunkMarkdownText(text, Number(config.textChunkLimit) || 4500);
++                for (const chunk of chunks) {
++                    await sendResolvedMarkdown(bot, resolveReplyTarget(target, petReplyLimiter, true), chunk);
++                }
++                if (emojiPath && existsSync(emojiPath)) {
++                    try {
++                        await bot.sendImage(resolveReplyTarget(target, petReplyLimiter, false), { localPath: emojiPath });
++                        logger?.debug?.("[pet] emoji image sent: " + emojiPath);
++                    } catch (error) {
++                        logger?.warn?.("[pet] emoji image send failed: " + (error?.message ?? error));
++                    }
++                }
++            },
++            onSent: async (context, text) => {
++                await petMemory.append(context.conversation_id, {
++                    role: "assistant",
++                    text: stripQqTimestamp(text),
++                    message_id: context.message_id,
++                    ts: Date.now()
++                }, { scope: context.scope, targetId: context.target_id });
++            }
++        });
++        try {
++            await petBridge.start();
++        } catch (err) {
++            logger.error("[pet] bridge start failed: " + (err instanceof Error ? err.message : String(err)));
++            petBridge = null;
++        }
++        bot.use(async (ctx, next) => {
++            if (!ctx.state.__petDispatched && ctx.message) {
++                ctx.state.__petDispatched = true;
++                try { logInbound(ctx.message, { stage: "dispatch-middleware" }); } catch {}
++                void handlePetInbound(ctx, bot, config, logger, petBridge, petMemory, petReplyLimiter, inboundImageDir).catch((err) => {
++                    logger.error("[pet] dispatch middleware failed: " + (err instanceof Error ? err.message : String(err)));
++                    logInbound(ctx.message, { stage: "dispatch-middleware-error", error: err instanceof Error ? err.message : String(err) });
++                });
++            }
++            await next();
++        });
++    }
++    // ── 入站：petMode 交给 dsh-pet；否则走原 dsh agent ──
+     bot.on('message', async (mCtx) => {
+         const msg = mCtx.message;
+-        // 记录最近 msgId，供无上下文的出站发送（文件发送显式 target、主动推送等）获取被动回复目标
+-        cacheMsgId(mCtx.replyTarget.scope, mCtx.replyTarget.targetId, mCtx.replyTarget.msgId);
+-        if (config.debug) {
+-            logger.debug(`← message (post-middleware): ${JSON.stringify(msg, null, 2).slice(0, 500)}`);
++        if (mCtx.state.__petDispatched) return;
++        mCtx.state.__petDispatched = true;
++        try { logInbound(msg, { stage: "message-listener", petMode: config.petMode, hasReplyTarget: !!mCtx.replyTarget, selfId: bot.selfId }); } catch {}
++        try {
++            if (mCtx.replyTarget) {
++                cacheMsgId(mCtx.replyTarget.scope, mCtx.replyTarget.targetId, mCtx.replyTarget.msgId);
++            } else {
++                logInbound(msg, { stage: "no-reply-target" });
++            }
++            if (config.debug) {
++                logger.debug(`← message (post-middleware): ${JSON.stringify(msg, null, 2).slice(0, 500)}`);
++            }
++            if (config.petMode === true) {
++                logInbound(msg, { stage: "dispatch-pet" });
++                void handlePetInbound(mCtx, bot, config, logger, petBridge, petMemory, petReplyLimiter, inboundImageDir).catch((err) => {
++                    logger.error("[pet] inbound failed: " + (err instanceof Error ? err.message : String(err)));
++                    logInbound(msg, { stage: "inbound-rejected", error: err instanceof Error ? err.message : String(err) });
++                });
++                return;
++            }
++            await handleInbound(mCtx, manager, config, logger);
++        } catch (error) {
++            logger.error("[pet] message listener error: " + (error instanceof Error ? error.message : String(error)));
++            logInbound(msg, { stage: "message-listener-error", error: error instanceof Error ? error.message : String(error) });
+         }
+-        await handleInbound(mCtx, manager, config, logger);
+     });
+     // ── 出站：dsh session/event → QQ 消息 ──
+     // 获取 tools 服务（工具结果结构化展示），可选
+@@ -148,9 +518,282 @@ export async function bootstrapGateway(ctx, agents, config, logger) {
+         });
+         return async () => {
+             logger.info('Shutting down');
++            await petBridge?.stop();
+             await manager.disposeAll();
+             bot.stop();
+         };
+     }, 'im-qqbot.lifecycle');
+ }
+-//# sourceMappingURL=bootstrap.js.map
+\ No newline at end of file
++//# sourceMappingURL=bootstrap.js.map
++
++async function handlePetInbound(mCtx, bot, config, logger, bridge, memory, limiter, imageDir) {
++    const msg = mCtx.message;
++    logInbound(msg, { stage: "handle-enter" });
++    if (!msg)
++        return;
++    if (msg.author?.bot === true || (bot.selfId && msg.senderId === bot.selfId)) {
++        logger.debug?.("[pet] ignored self message");
++        return;
++    }
++    const hasImages = Array.isArray(msg.attachments) && msg.attachments.some(isInboundImage);
++    const hasVideos = Array.isArray(msg.attachments) && msg.attachments.some(isInboundVideo);
++    let rawText = String(msg.content ?? "").trim();
++    const attachmentCount = Array.isArray(msg.attachments) ? msg.attachments.length : 0;
++    logInbound(msg, { stage: "enter", hasImages, hasVideos, attachmentCount });
++    if (!rawText && !hasImages && !hasVideos) {
++        // QQ 表情包/贴纸可能既没有 text，也没有 attachments；绝不能静默 return。
++        rawText = "[用户发了一张图片]";
++        logInbound(msg, { stage: "empty-nontext-placeholder" });
++    }
++    const scope = msg.kind === "group" ? "group" : "c2c";
++    const targetId = scope === "group" ? (msg.groupOpenid ?? msg.senderId) : msg.senderId;
++    const conversationId = scope === "group" ? "group:" + (msg.groupOpenid ?? targetId) : "c2c:" + targetId;
++    const senderName = msg.senderName || msg.senderId || "unknown";
++    const messageId = String(msg.messageId || (Date.now() + "-" + Math.random().toString(36).slice(2)));
++    let built;
++    try {
++        built = await buildQqContent(msg, config, logger, imageDir, messageId, mCtx);
++    } catch (error) {
++        logger.error("[pet] content build failed: " + (error instanceof Error ? error.message : String(error)));
++        logInbound(msg, { stage: "build-failed", error: error instanceof Error ? error.message : String(error) });
++        built = { text: "[用户发了一张图片]", content: null };
++    }
++    if (!built.text && !built.content) {
++        built = { text: "[用户发了一张图片]", content: null };
++    }
++    const prefix = scope === "group" ? "[" + senderName + "] " : "";
++    let text = (prefix + built.text).trim();
++    let content = built.content;
++    if (content && prefix) content = [{ type: "text", text: prefix }, ...content];
++    if (!text && content) text = (prefix + "[图片]").trim();
++    if (!text)
++        text = (prefix + "[用户发了一张图片]").trim();
++    logInbound(msg, { stage: "built", text, contentTypes: Array.isArray(content) ? content.map((p) => p?.type) : null });
++    const context = {
++        message_id: messageId,
++        sender_id: msg.senderId,
++        sender_name: senderName,
++        group_id: scope === "group" ? (msg.groupOpenid ?? targetId) : null,
++        scope,
++        conversation_id: conversationId,
++        target_id: targetId,
++        pet_id: config.petId || "main",
++        shared_memory: scope === "c2c" && Array.isArray(config.sharedC2cIds) && config.sharedC2cIds.includes(targetId)
++    };
++    const history = memory ? await memory.getHistory(conversationId, Number(config.petHistoryLimit) || 1000) : [];
++    if (memory) {
++        await memory.append(conversationId, {
++            role: "user",
++            text,
++            message_id: messageId,
++            sender_id: msg.senderId,
++            sender_name: senderName,
++            ts: Date.now()
++        }, { scope, targetId });
++    }
++    if (!bridge) {
++        logger.error("[pet] bridge unavailable; message not forwarded to dsh-pet");
++        return;
++    }
++    bridge.track(messageId, mCtx.replyTarget, context);
++    const packet = { action: "receive_qq_msg", context, text, history };
++    if (content)
++        packet.content = content;
++    bridge.enqueue(packet);
++}
++
++function logInbound(msg, extra = {}) {
++    try {
++        const line = JSON.stringify({
++            ts: new Date().toISOString(),
++            ...extra,
++            kind: msg?.kind,
++            messageId: msg?.messageId,
++            senderId: msg?.senderId,
++            groupId: msg?.groupOpenid,
++            content: String(msg?.content ?? "").slice(0, 800),
++            attachments: (Array.isArray(msg?.attachments) ? msg.attachments : []).map((a) => ({
++                content_type: a?.content_type,
++                url: typeof a?.url === "string" ? a.url.slice(0, 180) : "",
++                filename: a?.filename,
++                size: a?.size
++            })),
++            keys: msg && typeof msg === "object" ? Object.keys(msg) : [],
++            msg_elements: Array.isArray(msg?.msg_elements) ? msg.msg_elements.slice(0, 3) : undefined
++        });
++        appendFileSync(join(process.env.USERPROFILE || homedir(), ".dsh", "qqbot", "pet-inbound.log"), line + "\n", "utf8");
++    } catch {}
++}
++
++function withTimeout(promise, ms, message) {
++    let timer;
++    return Promise.race([
++        promise,
++        new Promise((_, reject) => {
++            timer = setTimeout(() => reject(new Error(message)), ms);
++        })
++    ]).finally(() => {
++        if (timer) clearTimeout(timer);
++    });
++}
++
++function isInboundImage(att) {
++    const contentType = String(att?.content_type ?? "").toLowerCase();
++    return contentType === "image" || contentType.startsWith("image/") || contentType === "sticker" || contentType === "mface";
++}
++
++function isInboundVideo(att) {
++    const contentType = String(att?.content_type ?? "").toLowerCase();
++    const filename = String(att?.filename ?? "").toLowerCase();
++    return contentType === "video" || contentType.startsWith("video/") || /\.(mp4|mov|mkv|webm)$/.test(filename);
++}
++
++function escapeRegExp(value) {
++    return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
++}
++
++function stripBotMention(content, appId) {
++    let text = String(content ?? "");
++    if (appId) {
++        text = text.replace(new RegExp("<@!?" + escapeRegExp(appId) + ">\\s*", "g"), "");
++    }
++    return text.trim();
++}
++
++async function buildQqContent(msg, config, logger, imageDir, messageId, mCtx) {
++    const raw = stripBotMention(msg.content, config.appId);
++    const faceRe = /\[<face,id=(\d+)\/?>]|<faceType=\d+,faceId="([^"]*)",ext="([^"]*)">|\[CQ:face,id=(\d+)\]/g;
++    const parts = [];
++    let fallback = "";
++    let last = 0;
++    let hasFace = false;
++    let match;
++    while ((match = faceRe.exec(raw)) !== null) {
++        hasFace = true;
++        const before = raw.slice(last, match.index);
++        if (before) {
++            parts.push({ type: "text", text: before });
++            fallback += before;
++        }
++        const id = match[1] || match[2] || match[4] || "";
++        parts.push({ type: "face", id });
++        fallback += "[表情:" + id + "]";
++        last = match.index + match[0].length;
++    }
++    if (hasFace) {
++        const tail = raw.slice(last);
++        if (tail) {
++            parts.push({ type: "text", text: tail });
++            fallback += tail;
++        }
++    } else {
++        fallback = raw;
++    }
++
++    const timeoutMs = Number(config.inboundImageTimeoutMs) || 5000;
++    const imageOptions = (att, contentType, filename) => ({
++        url: att.url,
++        contentType,
++        filename,
++        mediaDir: imageDir,
++        maxWidth: Number(config.inboundImageMaxWidth) || 800,
++        timeoutMs,
++        maxBytes: Number(config.inboundImageMaxBytes) || 20 * 1024 * 1024,
++        format: config.inboundImageFormat === "jpeg" ? "jpeg" : "webp",
++        quality: Number(config.inboundImageQuality) || 80,
++        logger
++    });
++
++    const images = Array.isArray(msg.attachments) ? msg.attachments.filter(isInboundImage) : [];
++    const hasImage = images.length > 0;
++    if (hasImage) {
++        if (!hasFace && fallback) parts.push({ type: "text", text: fallback });
++        for (let i = 0; i < images.length; i += 1) {
++            const att = images[i];
++            try {
++                const image = await withTimeout(processInboundImage(imageOptions(att, att.content_type, att.filename)), timeoutMs, "图片处理超时");
++                parts.push({ type: "image", path: image.path, width: image.width, height: image.height, format: image.format });
++                fallback += "[图片]";
++            } catch (error) {
++                const timedOut = error instanceof Error && /超时/.test(error.message);
++                logger.warn("[pet] image " + (timedOut ? "timeout" : "failed") + ": " + (error instanceof Error ? error.message : String(error)));
++                logInbound(msg, { stage: "image-failed", index: i, timedOut, error: error instanceof Error ? error.message : String(error) });
++                const placeholder = timedOut ? "[用户发了一张图片]" : "[用户发送了一张图片，但加载失败]";
++                parts.push({ type: "text", text: placeholder });
++                fallback += placeholder;
++            }
++        }
++    }
++
++    const quote = mCtx?.state?.quote;
++    const videos = Array.isArray(msg.attachments) ? msg.attachments.filter(isInboundVideo) : [];
++    const hasVideo = videos.length > 0;
++    if (hasVideo) {
++        if (!hasFace && !hasImage && fallback) parts.push({ type: "text", text: fallback });
++        for (let i = 0; i < videos.length; i += 1) {
++            const att = videos[i];
++            parts.push({
++                type: "video",
++                id: "v" + (i + 1),
++                url: String(att.url ?? ""),
++                filename: String(att.filename ?? "video.mp4")
++            });
++            fallback += "[视频]";
++        }
++    }
++    const quoteParts = [];
++    let quoteFallback = "";
++    let hasQuote = false;
++    if (quote && typeof quote === "object") {
++        const quoteRaw = stripBotMention(quote.rawContent ?? quote.text ?? "", config.appId);
++        const quoteText = quoteRaw.replace(/\[image:[^\]]*\]/gi, "").replace(/\[voice:[^\]]*\]/gi, "").trim();
++        logInbound(msg, { stage: "quote-context", quoteSource: quote.source, quoteText: quoteText.slice(0, 300), currentText: raw.slice(0, 300) });
++        if (quoteText) {
++            quoteParts.push({ type: "text", text: "[用户引用了历史消息：" + quoteText + "]\n" });
++            quoteFallback += "[用户引用了历史消息：" + quoteText + "]\n";
++            hasQuote = true;
++        }
++        const quoteImages = (Array.isArray(quote.attachments) ? quote.attachments : []).filter((att) => { const type = String(att?.contentType ?? "").toLowerCase(); return type === "image" || type.startsWith("image/"); });
++        for (let i = 0; i < quoteImages.length; i += 1) {
++            const att = quoteImages[i];
++            try {
++                const image = await withTimeout(processInboundImage(imageOptions(att, att.contentType, att.filename)), timeoutMs, "引用图片处理超时");
++                quoteParts.push({ type: "image", path: image.path, width: image.width, height: image.height, format: image.format });
++                quoteFallback += "[引用图片]";
++                hasQuote = true;
++            } catch (error) {
++                const timedOut = error instanceof Error && /超时/.test(error.message);
++                logger.warn("[pet] reference image " + (timedOut ? "timeout" : "failed") + ": " + (error instanceof Error ? error.message : String(error)));
++                logInbound(msg, { stage: "quote-image-failed", index: i, timedOut, error: error instanceof Error ? error.message : String(error) });
++                quoteParts.push({ type: "text", text: "[引用图片加载失败]" });
++                quoteFallback += "[引用图片加载失败]";
++                hasQuote = true;
++            }
++        }
++        if (!hasQuote && quote.text && quote.text !== "[empty message]") {
++            quoteParts.push({ type: "text", text: "[用户引用了历史消息：" + String(quote.text) + "]\n" });
++            quoteFallback += "[用户引用了历史消息：" + String(quote.text) + "]\n";
++            hasQuote = true;
++        }
++    }
++    if (hasQuote) {
++        // Keep quote and current input as two distinct text blocks. Do not split
++        // the current text around image parts; the model must see it as one block.
++        const currentImages = parts.filter((part) => part?.type === "image");
++        const currentText = (hasFace ? fallback : raw).replace(/\[图片]/g, "").trim();
++        const currentBlock = "[用户当前说：" + currentText + "]";
++        const nextParts = [...quoteParts, { type: "text", text: currentBlock }, ...currentImages];
++        parts.length = 0;
++        parts.push(...nextParts);
++        fallback = quoteFallback + currentBlock + "[图片]".repeat(currentImages.length);
++    }
++
++    const mixed = hasFace || hasImage || hasVideo || hasQuote;
++    let text = (mixed ? fallback : raw).trim();
++    if (!text) text = hasVideo ? "[视频]" : "[用户发了一张图片]";
++    return {
++        text,
++        content: mixed ? parts : null,
++        videos
++    };
++}
+diff --git a/dist/gateway/middleware-setup.js b/dist/gateway/middleware-setup.js
+index ca4b002..72548f2 100644
+--- a/dist/gateway/middleware-setup.js
++++ b/dist/gateway/middleware-setup.js
+@@ -7,7 +7,7 @@ export function setupMiddlewares(bot, config, manager, logger) {
+     // 1. 错误兜底（最外层洋葱皮）
+     bot.use(errorHandler());
+     // 2. 消息过滤：bot 回声 + 消息去重
+-    bot.use(messageFilter({ skipSelfEcho: false }));
++    bot.use(messageFilter({ skipSelfEcho: config.petMode === true }));
+     // 3. 访问控制（白名单/开放/禁用）
+     bot.use(accessPolicy({
+         c2c: {
+@@ -42,9 +42,11 @@ export function setupMiddlewares(bot, config, manager, logger) {
+         requireMentionInGroup: config.requireMention,
+     }));
+     // 6. 内容清洗（去 @marker、表情标签、多余空白）
+-    bot.use(contentSanitizer({
+-        parseFaceTags: true,
+-    }));
++    if (config.petMode !== true) {
++        bot.use(contentSanitizer({
++            parseFaceTags: true,
++        }));
++    }
+     // 7. 三层限流（sender / group / global）
+     bot.use(rateLimiter());
+     // 8. 斜杠命令（在 concurrencyGuard 之前，命令匹配后不排队直接响应）
+@@ -54,24 +56,30 @@ export function setupMiddlewares(bot, config, manager, logger) {
+         autoHelp: false,
+         commands: buildCommandList({ manager, config }),
+     });
+-    bot.use(slash.middleware);
++    if (config.petMode !== true)
++        bot.use(slash.middleware);
+     // 8.5. 待答问题截获（在 concurrencyGuard 之前，答案消息不排队直接作答）
+-    bot.use(questionAnswer(manager));
++    if (config.petMode !== true)
++        bot.use(questionAnswer(manager));
+     // 9. 并发串行 + 消息合并（同 peer 排队，避免 session 冲突）
+-    bot.use(concurrencyGuard({
+-        strategy: 'merge',
+-        maxQueue: config.maxQueue,
+-        maxProcessingMs: config.processingTimeoutMs,
+-    }));
++    if (config.petMode !== true) {
++        bot.use(concurrencyGuard({
++            strategy: 'merge',
++            maxQueue: config.maxQueue,
++            maxProcessingMs: config.processingTimeoutMs,
++        }));
++    }
+     // 10. C2C 输入状态指示
+-    bot.use(typingIndicator());
++    if (config.petMode !== true)
++        bot.use(typingIndicator());
+     // 11. 引用消息解析（记录 + 解析被引用原文）
+     bot.use(quoteRef({
+         maxSize: 500,
+         preferMsgElements: true,
+     }));
+     // 11.5. 附件下载（file 附件下载到本地，供 @提及 / 工具访问）
+-    bot.use(attachmentProcessor(config, logger));
++    if (config.petMode !== true)
++        bot.use(attachmentProcessor(config, logger));
+     // 12. 上下文组装（将 history + quote + sender 组成 envelope）
+     bot.use(envelopeFormatter({
+         historyLimit: config.historyLimit,
+diff --git a/dist/pet-bridge/image.js b/dist/pet-bridge/image.js
+new file mode 100644
+index 0000000..549d203
+--- /dev/null
++++ b/dist/pet-bridge/image.js
+@@ -0,0 +1,161 @@
++import { randomBytes } from 'node:crypto'
++import { mkdir, readdir, stat, unlink, writeFile } from 'node:fs/promises'
++import { extname, join } from 'node:path'
++
++const MAX_CONCURRENCY = 3
++const DEFAULT_MAX_BYTES = 20 * 1024 * 1024
++const CLEANUP_INTERVAL_MS = 30 * 60 * 1000
++const FILE_TTL_MS = 6 * 60 * 60 * 1000
++
++let active = 0
++const waiters = []
++let lastCleanup = 0
++
++const acquire = () => new Promise((resolve) => {
++  if (active < MAX_CONCURRENCY) {
++    active += 1
++    resolve()
++    return
++  }
++  waiters.push(resolve)
++})
++
++const release = () => {
++  const next = waiters.shift()
++  if (next) next()
++  else active = Math.max(0, active - 1)
++}
++
++const isImageType = (contentType) => {
++  if (typeof contentType !== 'string') return false
++  const type = contentType.toLowerCase()
++  return type === 'image' || type.startsWith('image/') || type === 'sticker' || type === 'mface'
++}
++
++async function cleanupOldImages(dir, logger) {
++  const now = Date.now()
++  if (now - lastCleanup < CLEANUP_INTERVAL_MS) return
++  lastCleanup = now
++  try {
++    const names = await readdir(dir)
++    for (const name of names) {
++      const path = join(dir, name)
++      try {
++        const info = await stat(path)
++        if (info.isFile() && now - info.mtimeMs > FILE_TTL_MS) await unlink(path)
++      } catch {}
++    }
++  } catch {}
++}
++
++async function compressWithSharp(buffer, outPath, maxWidth, format, quality) {
++  const mod = await import('sharp')
++  const sharp = mod.default ?? mod
++  let pipeline = sharp(buffer, { failOn: 'none' }).rotate().resize({
++    width: maxWidth,
++    withoutEnlargement: true,
++    fit: 'inside',
++  })
++  if (format === 'jpeg') await pipeline.jpeg({ quality }).toFile(outPath)
++  else await pipeline.webp({ quality }).toFile(outPath)
++  const meta = await sharp(outPath).metadata()
++  return { width: meta.width ?? null, height: meta.height ?? null, format: format === 'jpeg' ? 'jpeg' : 'webp' }
++}
++
++async function compressWithJimp(buffer, outPath, maxWidth) {
++  const mod = await import('jimp')
++  const Jimp = mod.Jimp ?? mod.default
++  if (!Jimp || typeof Jimp.read !== 'function') throw new Error('jimp unavailable')
++  const image = await Jimp.read(buffer)
++  if (typeof image.resize === 'function') {
++    if (image.bitmap) {
++      const width = Math.min(maxWidth, image.bitmap.width)
++      image.resize(width, Jimp.AUTO ?? -1)
++    } else {
++      image.resize({ w: maxWidth })
++    }
++  }
++  if (typeof image.writeAsync === 'function') await image.writeAsync(outPath)
++  else if (typeof image.write === 'function') await image.write(outPath)
++  else throw new Error('jimp write unavailable')
++  return { width: image.bitmap?.width ?? null, height: image.bitmap?.height ?? null, format: 'jpeg' }
++}
++
++/**
++ * 下载 + 压缩一张 QQ 入站图片。
++ * 失败会抛出；调用方负责降级成文本占位符。
++ */
++export async function processInboundImage(options) {
++  const {
++    url,
++    contentType,
++    filename,
++    mediaDir,
++    maxWidth = 800,
++    timeoutMs = 5000,
++    maxBytes = DEFAULT_MAX_BYTES,
++    format = 'webp',
++    quality = 80,
++    logger,
++  } = options
++  if (!url || typeof url !== 'string') throw new Error('图片缺少 url')
++  if (!/^https?:\/\//i.test(url)) throw new Error('不支持的图片协议')
++  if (!isImageType(contentType) && !/^image\//i.test(contentType ?? '')) {
++    const ext = String(filename ?? '').toLowerCase()
++    if (!['.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp'].includes(extname(ext))) throw new Error('不是图片附件')
++  }
++  await acquire()
++  try {
++    await mkdir(mediaDir, { recursive: true })
++    await cleanupOldImages(mediaDir, logger)
++
++    const controller = new AbortController()
++    const timer = setTimeout(() => controller.abort(new Error('图片处理超时')), timeoutMs)
++    const started = Date.now()
++    try {
++      const response = await fetch(url, {
++        headers: { 'user-agent': 'dsh-qqbot/0.5.2' },
++        redirect: 'follow',
++        signal: controller.signal,
++      })
++      if (!response.ok) throw new Error('图片下载失败：HTTP ' + response.status)
++      const length = Number(response.headers.get('content-length') || 0)
++      if (length > maxBytes) throw new Error('图片超过大小上限')
++      const buffer = Buffer.from(await response.arrayBuffer())
++      if (buffer.byteLength === 0) throw new Error('图片为空')
++      if (buffer.byteLength > maxBytes) throw new Error('图片超过大小上限')
++
++      const useJpeg = format === 'jpeg'
++      const ext = useJpeg ? 'jpg' : 'webp'
++      let outPath = join(mediaDir, 'inbound-' + Date.now() + '-' + randomBytes(4).toString('hex') + '.' + ext)
++      let meta
++      try {
++        meta = await compressWithSharp(buffer, outPath, maxWidth, useJpeg ? 'jpeg' : 'webp', quality)
++      } catch (sharpError) {
++        logger?.warn?.('[pet-bridge] sharp failed, falling back to jimp: ' + (sharpError instanceof Error ? sharpError.message : String(sharpError)))
++        const jimpPath = outPath.replace(/\.webp$/i, '.jpg')
++        try { await unlink(outPath) } catch {}
++        try {
++          meta = await compressWithJimp(buffer, jimpPath, maxWidth)
++          outPath = jimpPath
++        } catch (jimpError) {
++          try { await unlink(jimpPath) } catch {}
++          throw new Error('图片压缩失败：' + (jimpError instanceof Error ? jimpError.message : String(jimpError)))
++        }
++      }
++      if (Date.now() - started > timeoutMs) throw new Error('图片处理超时')
++      const info = await stat(outPath)
++      return {
++        path: outPath,
++        width: meta?.width ?? null,
++        height: meta?.height ?? null,
++        format: meta?.format ?? (useJpeg ? 'jpeg' : 'webp'),
++        bytes: info.size,
++      }
++    } finally {
++      clearTimeout(timer)
++    }
++  } finally {
++    release()
++  }
++}
+diff --git a/dist/pet-bridge/memory.js b/dist/pet-bridge/memory.js
+new file mode 100644
+index 0000000..fbeff5a
+--- /dev/null
++++ b/dist/pet-bridge/memory.js
+@@ -0,0 +1,73 @@
++import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
++import { dirname } from 'node:path'
++
++/**
++ * QQ 专用记忆：与 dsh-pet 的 memory.json 完全隔离。
++ * 结构：
++ * { version: 1, conversations: { "c2c:xxx": { scope, targetId, updatedAt, messages: [...] } } }
++ */
++export class QqMemory {
++  constructor(filePath, options = {}) {
++    this.filePath = filePath
++    this.limit = Number(options.limit) || 1000
++    this.logger = options.logger
++    this.data = null
++    this.writeQueue = Promise.resolve()
++  }
++
++  async load() {
++    if (this.data) return this.data
++    try {
++      const raw = await readFile(this.filePath, 'utf8')
++      const parsed = JSON.parse(raw)
++      if (!parsed || typeof parsed !== 'object' || !parsed.conversations) throw new Error('bad memory shape')
++      this.data = parsed
++    } catch (error) {
++      if (error?.code !== 'ENOENT') {
++        this.logger?.warn?.('[pet-bridge] qq memory unreadable, starting empty: ' + (error instanceof Error ? error.message : String(error)))
++      }
++      this.data = { version: 1, conversations: {} }
++    }
++    return this.data
++  }
++
++  async getHistory(conversationId, limit = 1000) {
++    await this.load()
++    const conversation = this.data.conversations[conversationId]
++    const messages = Array.isArray(conversation?.messages) ? conversation.messages : []
++    // 群聊/私聊历史严格累加，不做滑动窗口截断。
++    return messages.map((message) => ({
++      role: message.role === 'assistant' ? 'assistant' : 'user',
++      content: String(message.text ?? ''),
++      ts: Number(message.ts) || 0,
++    })).filter((message) => message.content.trim() !== '')
++  }
++
++  async append(conversationId, entry, meta) {
++    await this.load()
++    const current = this.data.conversations[conversationId] || (this.data.conversations[conversationId] = {
++      scope: meta?.scope ?? '',
++      targetId: meta?.targetId ?? '',
++      updatedAt: 0,
++      messages: [],
++    })
++    current.scope = meta?.scope ?? current.scope
++    current.targetId = meta?.targetId ?? current.targetId
++    current.updatedAt = Date.now()
++    current.messages.push(entry)
++    // 不再按 limit 裁剪；历史一旦写入就永久保留。
++    await this.save()
++  }
++
++  save() {
++    this.writeQueue = this.writeQueue.then(async () => {
++      await mkdir(dirname(this.filePath), { recursive: true })
++      const temp = this.filePath + '.tmp'
++      await writeFile(temp, JSON.stringify(this.data, null, 2), 'utf8')
++      await rename(temp, this.filePath)
++    }).catch((error) => {
++      this.logger?.warn?.('[pet-bridge] qq memory save failed: ' + (error instanceof Error ? error.message : String(error)))
++    })
++    return this.writeQueue
++  }
++}
+diff --git a/dist/pet-bridge/server.js b/dist/pet-bridge/server.js
+new file mode 100644
+index 0000000..1a9b454
+--- /dev/null
++++ b/dist/pet-bridge/server.js
+@@ -0,0 +1,211 @@
++import { randomBytes } from 'node:crypto'
++import { mkdir, rename, unlink, writeFile } from 'node:fs/promises'
++import { dirname } from 'node:path'
++import { WebSocketServer } from 'ws'
++
++const PENDING_TTL_MS = 5 * 60 * 1000
++const MAX_QUEUE = 200
++
++/**
++ * 本地 WebSocket 桥：
++ * - dsh-qqbot 把 QQ 消息作为 receive_qq_msg 发给桌宠；
++ * - 桌宠用 send_to_qq 回传；
++ * - 服务端只按 message_id 查原始 reply target，不信任桌宠传来的地址。
++ */
++export class PetBridge {
++  constructor(options) {
++    this.host = options.host || '127.0.0.1'
++    this.basePort = Number(options.port) || 9527
++    this.portCount = Number(options.portCount) || 10
++    this.discoveryPath = options.discoveryPath
++    this.logger = options.logger || console
++    this.sendReply = options.sendReply
++    this.onSent = options.onSent
++    this.token = randomBytes(24).toString('hex')
++    this.server = null
++    this.port = null
++    this.client = null
++    this.queue = []
++    this.pending = new Map()
++    this.sweepTimer = null
++  }
++
++  async start() {
++    for (let i = 0; i < this.portCount; i += 1) {
++      const port = this.basePort + i
++      try {
++        await this.listen(port)
++        this.port = port
++        break
++      } catch (error) {
++        if (error?.code !== 'EADDRINUSE') throw error
++      }
++    }
++    if (!this.port) throw new Error('没有可用端口：' + this.basePort + '-' + (this.basePort + this.portCount - 1))
++    await mkdir(dirname(this.discoveryPath), { recursive: true })
++    const temp = this.discoveryPath + '.tmp'
++    await writeFile(temp, JSON.stringify({
++      port: this.port,
++      token: this.token,
++      pid: process.pid,
++      startedAt: Date.now()
++    }, null, 2), 'utf8')
++    await rename(temp, this.discoveryPath)
++    this.sweepTimer = setInterval(() => this.sweep(), 30_000)
++    this.logger.info?.(`[pet-bridge] listening ws://${this.host}:${this.port}/pet`)
++    return this.port
++  }
++
++  listen(port) {
++    return new Promise((resolve, reject) => {
++      const server = new WebSocketServer({
++        host: this.host,
++        port,
++        verifyClient: (info, callback) => {
++          try {
++            const url = new URL(info.req.url || '/', 'http://127.0.0.1')
++            const allowed = url.pathname === '/pet' && url.searchParams.get('token') === this.token
++            callback(allowed, allowed ? 200 : 401, allowed ? 'OK' : 'Unauthorized')
++          } catch {
++            callback(false, 400, 'Bad Request')
++          }
++        }
++      })
++      const onError = (error) => {
++        server.off('listening', onListening)
++        try { server.close() } catch {}
++        reject(error)
++      }
++      const onListening = () => {
++        server.off('error', onError)
++        this.server = server
++        this.bind(server)
++        resolve()
++      }
++      server.once('error', onError)
++      server.once('listening', onListening)
++    })
++  }
++
++  bind(server) {
++    server.on('connection', (ws) => {
++      if (this.client && this.client !== ws) {
++        try { this.client.close() } catch {}
++      }
++      this.client = ws
++      this.logger.info?.('[pet-bridge] dsh-pet connected')
++      this.send(ws, { action: 'hello', bridge: 'dsh-qqbot', ts: Date.now() })
++      this.flush()
++      ws.on('message', (data) => {
++        let packet
++        try { packet = JSON.parse(data.toString('utf8')) } catch { return }
++        if (!packet || typeof packet !== 'object') return
++        if (packet.action === 'send_to_qq') {
++          void this.handleSend(ws, packet)
++        } else if (packet.action === 'ready') {
++          this.logger.info?.('[pet-bridge] dsh-pet ready: ' + String(packet.pet_id ?? packet.petId ?? 'main'))
++        }
++      })
++      ws.on('close', () => {
++        if (this.client === ws) this.client = null
++        this.logger.warn?.('[pet-bridge] dsh-pet disconnected')
++      })
++      ws.on('error', (error) => {
++        this.logger.warn?.('[pet-bridge] client error: ' + (error instanceof Error ? error.message : String(error)))
++      })
++    })
++    server.on('error', (error) => {
++      this.logger.error?.('[pet-bridge] server error: ' + (error instanceof Error ? error.message : String(error)))
++    })
++  }
++
++  track(messageId, target, context) {
++    if (!messageId) return
++    this.pending.set(String(messageId), {
++      target,
++      context,
++      expiresAt: Date.now() + PENDING_TTL_MS
++    })
++  }
++
++  enqueue(packet) {
++    if (this.client && this.client.readyState === 1) {
++      this.send(this.client, packet)
++      return
++    }
++    this.queue.push(packet)
++    if (this.queue.length > MAX_QUEUE) this.queue.splice(0, this.queue.length - MAX_QUEUE)
++    this.logger.warn?.('[pet-bridge] dsh-pet offline; queued ' + packet?.context?.message_id)
++  }
++
++  send(ws, packet) {
++    try {
++      if (ws.readyState === 1) ws.send(JSON.stringify(packet))
++    } catch (error) {
++      this.logger.warn?.('[pet-bridge] send failed: ' + (error instanceof Error ? error.message : String(error)))
++    }
++  }
++
++  flush() {
++    if (!this.client || this.client.readyState !== 1) return
++    const pending = this.queue.splice(0)
++    for (const packet of pending) this.send(this.client, packet)
++  }
++
++  async handleSend(ws, packet) {
++    const context = packet.context && typeof packet.context === 'object' ? packet.context : {}
++    const messageId = String(context.message_id ?? '')
++    const pending = this.pending.get(messageId)
++    if (!pending) {
++      this.send(ws, { action: 'error', message_id: messageId, error: 'unknown or expired message_id' })
++      return
++    }
++    if (pending.context?.conversation_id && context.conversation_id && pending.context.conversation_id !== context.conversation_id) {
++      this.send(ws, { action: 'error', message_id: messageId, error: 'conversation mismatch' })
++      return
++    }
++    if (pending.expiresAt < Date.now()) {
++      this.pending.delete(messageId)
++      this.send(ws, { action: 'error', message_id: messageId, error: 'message expired' })
++      return
++    }
++    const text = String(packet.text ?? '').trim()
++    const emojiPath = String(packet.emojiPath ?? '').trim()
++    const voice = packet.voice === true
++    if (!text && !emojiPath && !voice) {
++      this.send(ws, { action: 'error', message_id: messageId, error: 'empty text' })
++      return
++    }
++    try {
++      await this.sendReply(pending.target, text, emojiPath, voice)
++      await this.onSent?.(pending.context, text)
++      this.pending.delete(messageId)
++      this.send(ws, { action: 'ack', message_id: messageId, ok: true })
++      this.logger.info?.('[pet-bridge] QQ reply sent for ' + messageId)
++    } catch (error) {
++      this.logger.error?.('[pet-bridge] QQ reply failed for ' + messageId + ': ' + (error instanceof Error ? error.message : String(error)))
++      this.send(ws, { action: 'error', message_id: messageId, error: error instanceof Error ? error.message : String(error) })
++    }
++  }
++
++  sweep() {
++    const now = Date.now()
++    for (const [messageId, pending] of this.pending) {
++      if (pending.expiresAt < now) this.pending.delete(messageId)
++    }
++  }
++
++  async stop() {
++    if (this.sweepTimer) clearInterval(this.sweepTimer)
++    this.sweepTimer = null
++    try { this.client?.close() } catch {}
++    this.client = null
++    if (this.server) {
++      await new Promise((resolve) => {
++        try { this.server.close(() => resolve()) } catch { resolve() }
++      })
++    }
++    this.server = null
++    try { await unlink(this.discoveryPath) } catch {}
++  }
++}

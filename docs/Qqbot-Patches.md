@@ -109,3 +109,68 @@ direct fallback textLen=0               → 调用方传了空文本（就是那
 
 **已撤销**：2026-11-18 21:27 定位完成后按要求删除（`logVoice` 函数与 8 处调用、`~/.dsh/qqbot/voice.log` 全部移除）。
 保留此节仅为记录：万一将来语音又出问题，可以照此重新加回。
+
+## 补丁工程化（2026-11-19）
+
+历史做法是手改 `node_modules`，升级或重装就丢。现在改为**可重放 + 可自检**。
+
+### 版本钉死
+
+```yaml
+# ~/.dsh/profiles/desktop/package.json
+"@tencent-connect/dsh-qqbot": "0.5.2"    # 原来是 ^0.5.2
+```
+
+`^` 会让任何一次 `pnpm install` 拉到 0.5.5，把补丁连同 petMode 一起冲掉。
+
+### 补丁文件
+
+```text
+~/.dsh/profiles/desktop/patches/@tencent-connect__dsh-qqbot@0.5.2.patch
+repo: tools/dsh/patches/同名文件（版本管理用，可 diff 复查）
+
+~/.dsh/profiles/desktop/package.json
+  "pnpm": { "patchedDependencies": {
+    "@tencent-connect/dsh-qqbot@0.5.2": "patches/@tencent-connect__dsh-qqbot@0.5.2.patch"
+  }}
+```
+
+补丁内容只有 6 个文件：
+
+```text
+新增  dist/pet-bridge/{server,memory,image}.js
+修改  dist/config.js                     +petMode/petId/petWsPort
+      dist/gateway/middleware-setup.js   +petMode 中间件
+      dist/gateway/bootstrap.js          +petMode 分支 + GSV 语音管线 + 宿主优先路由
+```
+
+生成方式（已验证）：以 npm 原包为 baseline 建临时 git 仓库 → 覆盖为已安装版本 →
+`git diff --cached`。**必须关掉 autocrlf**，否则行尾被归一化，打出来的包和原文件字节不同：
+
+```powershell
+git -c core.autocrlf=false -c core.eol=lf -c core.safecrlf=false diff --cached --no-color
+```
+
+验证可重放：把补丁打到干净的 npm 原包上，与已安装目录**逐字节比对**，必须完全一致。
+
+### 校验脚本
+
+```powershell
+node tools/dsh/verify-qqbot-patches.mjs          # 详细
+node tools/dsh/verify-qqbot-patches.mjs --quiet  # 只在失败时输出
+```
+
+检查 6 个文件的标记；任一缺失退出码 1，并打印修复方式。
+DSH 升级、插件更新、任何 install 之后跑一次（30 秒）。
+
+### 升级 qqbot 时怎么做
+
+```text
+1. 下载新版本 tarball，解包到临时目录
+2. 以新原包为 baseline，把 petMode/语音/pet-bridge 移植过去（0.5.5 是 dist→lib 重构，需重写路径）
+3. 生成新补丁：patches/@tencent-connect__dsh-qqbot@<新版本>.patch
+4. package.json 同时改两处：依赖版本号 + patchedDependencies 的 key
+5. pnpm install → 跑校验脚本 → 重启验 QQ 文字与语音
+```
+
+注意：`patchedDependencies` 的 key 必须带版本号，升级后旧的 patch 不会自动生效。
