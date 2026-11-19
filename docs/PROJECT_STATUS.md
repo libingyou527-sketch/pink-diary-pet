@@ -1272,3 +1272,84 @@ tools/gpt-sovits/start.ps1  同样三行
 ~/.dsh/qqbot/voice.log   纯文本诊断日志，每次语音 1-4 行
                           定位已完成，可删可留（待用户决定）
 ```
+
+## 24. 2026-11-18 夜 → 11-19 晨：路由收编、日记总结、数据目录改名
+
+### 24.1 F3.6 记忆/日记路由收编（eb20dc9）
+
+```text
+GET/HEAD /dsh-pet-memory     原 dsh-pet-memory-viewer 插件
+GET      /xu-diary/entries   原 xu-pink-diary 插件
+POST     /xu-diary/entries
+POST     /xu-diary/delete
+GET      /xu-diary/health
+```
+
+两个 UI 插件退化为纯前端（`index.js` 只剩 `name` 与空 `apply`），路由由 core 提供，
+契约不变，两个 `client.js` 一行未改。`diaryDir` 改成每次请求现取 `runtimeConfig.diaryDir`，
+所以「重载配置」后立即生效。
+
+### 24.2 今日总结按钮（5dfbc28）
+
+```text
+POST /dsh-pet-7340/diary/summary    手动触发（提前写）
+GET  同一路由                        返回 { exists, at, messages, minMessages }
+三层去重  ① 写前查 hasTodaySummary  ② diaryWriting 锁  ③ 23:59 调度预检
+门槛      当天对话 < 4 条 → too-early
+失败      LLM 错误直接返回，不写空段落
+```
+
+判据不是"文件是否存在"——00:01 就会建空白骨架，文件一直存在。
+
+### 24.3 昨日空白清理（f1223c4 / d177445）
+
+```text
+启动时 + 00:01：昨天文件存在 且 正文为空 且 昨天零对话 → 删除
+空白但有对话 → kept-chat 保留；有正文 → kept-content 保留
+每天一次（daily-diary.json 的 blankCleanupDate 记忆）
+```
+
+### 24.4 两个自己的 bug（00833b4 / d177445）
+
+```text
+① 路由用了 stat() 但 core 的 node:fs/promises 没有导入 stat
+   → /dsh-pet-memory 报 "stat is not defined"，/xu-diary/entries 返回空列表
+   → 面板看起来"记忆和日记全没了"（数据其实完好）
+   教训：修改读数据的代码后，必须先调一次真实路由再交付
+② 清理函数把任何异常都记成 absent，真实错误被吞掉
+   改成：ENOENT → absent；其他 → read-failed 并记录 dir/code/message
+   再改成列目录按文件名匹配，不再自己拼路径
+```
+
+### 24.5 数据目录改名（1c763d5 / 8a5a12b）
+
+```text
+~/.dsh/dsh-pet/*     → ~/.dsh/xilian/pet/*
+~/.dsh/tts-gsv/*     → ~/.dsh/xilian/tts/*
+~/.dsh/xilian-tts/*  → ~/.dsh/xilian/tts/audio/*
+
+三个 junction 已删除；代码、安装脚本、qqbot patch、electron-helper 全部改直连。
+遗漏过一处：runtime/electron-helper/main.js 的 STARTUP_LOG 仍在旧路径，
+导致 helper 把 ~/.dsh/dsh-pet 重新建成实体目录（内含 startup.log）——已修。
+```
+
+### 24.6 11-19 早间验证
+
+```text
+/config 200 · /dsh-pet-memory 317 KB · /xu-diary/entries 21 条
+/gsv-status listening · /diary/summary exists=false, messages=0（新的一天）
+三个旧目录均不存在；startup.log 已在新位置写入
+
+夜间自动化：
+  00:01  建立 2026-11-19 空白骨架
+  00:01  昨日清理 → kept-content（11-18 有内容）
+  23:54  手动一日总结写入；23:59 定时任务因 summaryDate 已设而跳过（无重复）
+```
+
+### 24.7 遗留
+
+```text
+~/.dsh/xilian/pet 只保留每类最新一个备份（main-config、memory）
+~/.dsh/qqbot/voice.log 仍在（诊断日志，可删可留）
+ChatTTS / RVC 目录保留但已停用（无进程、无自启、无代码引用）
+```
