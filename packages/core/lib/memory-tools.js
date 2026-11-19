@@ -84,7 +84,19 @@ export async function executeMemoryTool(name, args, { store, scopes }) {
             query: keyword,
             limit: Math.max(1, Math.min(10, Number(args?.limit) || 5))
         });
-        return formatSearch(results);
+        let out = formatSearch(results);
+        // 常见问题（"第一句话是什么"）一轮就能答：附上命中块开头两条原文。
+        const top = results.find((hit) => hit && hit.blockId);
+        if (top) {
+            try {
+                const head = await store.decompress({ scopes, blockId: top.blockId, offset: 0, limit: 2 });
+                if (!head.missing && head.messages.length > 0) {
+                    out += "\nblock " + top.blockId + " 开头原文：\n" +
+                        head.messages.map((m) => "[" + m.role + "] " + m.content).join("\n");
+                }
+            } catch {}
+        }
+        return out;
     }
     if (name === "decompress_old_memory") {
         const result = await store.decompress({

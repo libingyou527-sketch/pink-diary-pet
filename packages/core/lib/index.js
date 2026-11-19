@@ -4815,17 +4815,23 @@ const generateChatWithMemory = async ({ system, history, text, pool, images, fou
         generated = stripVideoMarker(generated);
     }
     if (!memoryBlockStore || !Array.isArray(memoryScopes) || memoryScopes.length === 0) return stripVideoMarker(generated);
-    const calls = parseMemoryToolMarkers(generated.text);
-    if (calls.length === 0) return stripVideoMarker(generated);
-    if (calls.length === 0) return generated;
-    const results = [];
-    for (const call of calls.slice(0, 2)) {
-        results.push(await executeMemoryTool(call.name, call.args, { store: memoryBlockStore, scopes: memoryScopes }));
+    // 两轮工具：search 之后通常还要 decompress 才能取到原文（如"第一句话"）。
+    let lastResults = [];
+    for (let round = 0; round < 2; round += 1) {
+        const calls = parseMemoryToolMarkers(generated.text);
+        if (calls.length === 0) break;
+        const results = [];
+        for (const call of calls.slice(0, 2)) {
+            results.push(await executeMemoryTool(call.name, call.args, { store: memoryBlockStore, scopes: memoryScopes }));
+        }
+        lastResults = results;
+        const hint = round === 0
+            ? "\n如果还需要确认某个 block 的原文，现在可以再输出一次 [[decompress_old_memory: b<id>]]；这是最后一次工具机会。"
+            : "\n现在工具结果已经返回。请直接用自然语言回答用户当前问题；不要输出任何工具标记，也不要再请求工具。不要编造结果里没有的内容。";
+        currentText += "\n\n【旧记忆工具结果】\n" + results.join("\n\n") + hint;
+        generated = await generateChat(ctx, system, history, currentText, pool, model, imageList);
+        if (!generated.ok) return generated;
     }
-    currentText += "\n\n【旧记忆工具结果】\n" + results.join("\n\n") +
-        "\n现在工具结果已经返回。请直接用自然语言回答用户当前问题；不要输出任何 [[search_old_memory: ...]] 或 [[decompress_old_memory: ...]] 标记，也不要再请求工具。不要编造结果里没有的内容。";
-    generated = await generateChat(ctx, system, history, currentText, pool, model, imageList);
-    if (!generated.ok) return generated;
     const finalText = String(generated.text ?? "");
     if (parseMemoryToolMarkers(finalText).length > 0 || VIDEO_STORYBOARD_MARKER_RE.test(finalText)) {
         const cleaned = finalText
@@ -4833,7 +4839,7 @@ const generateChatWithMemory = async ({ system, history, text, pool, images, fou
             .replace(VIDEO_STORYBOARD_MARKER_RE, "")
             .replace(/\n{3,}/g, "\n\n")
             .trim();
-        return { ...generated, text: cleaned || results.join("\n\n") };
+        return { ...generated, text: cleaned || lastResults.join("\n\n") };
     }
     return stripVideoMarker(generated);
 };
