@@ -4893,7 +4893,7 @@ const estimateTokens = (text) => {
 };
 const estimateHistoryTokens = (messages) => (Array.isArray(messages) ? messages : []).reduce((sum, message) => sum + estimateTokens(message?.content), 0);
 const normalizeHistory = (messages) => (Array.isArray(messages) ? messages : [])
-    .map((message) => ({ role: message?.role === "assistant" ? "assistant" : "user", content: String(message?.content ?? message?.text ?? "") }))
+    .map((message) => ({ role: message?.role === "assistant" ? "assistant" : "user", ts: Number(message?.ts) || 0, content: String(message?.content ?? message?.text ?? "") }))
     .filter((message) => message.content.trim() !== "");
 const messagesToTurns = (messages) => {
     const turns = [];

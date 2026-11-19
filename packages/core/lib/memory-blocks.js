@@ -29,7 +29,7 @@ function normalizeMessage(message) {
     return {
         role,
         content,
-        ts: Number(message?.ts) || Date.now(),
+        ts: Number(message?.ts) || 0,
         ...(Array.isArray(message?.images) && message.images.length ? { images: message.images } : {})
     };
 }

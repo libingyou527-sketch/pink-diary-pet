@@ -67,8 +67,13 @@ export async function prepareStructuredContext({
     const existing = await store.list(allowedScopes);
     const primaryBlocks = existing.filter((block) => block.scope === primaryScope);
     const latestEnd = primaryBlocks.reduce((latest, block) => Math.max(latest, Number(block.end) || 0), 0);
-    if (primaryBlocks.length > 0) {
+    if (primaryBlocks.length > 0 && latestEnd > 0) {
         nextHistory = normalized.filter((message) => (Number(message.ts) || 0) > latestEnd);
+        // 边界异常（把边界写成了"现在"）会让历史被整段切掉：至少保留最近一半。
+        if (nextHistory.length === 0 && normalized.length > 0) {
+            const turns = turnsOf(normalized);
+            nextHistory = turns.slice(Math.floor(turns.length / 2)).flat();
+        }
     }
 
     let created = null;
