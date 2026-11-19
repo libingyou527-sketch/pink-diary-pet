@@ -2,18 +2,18 @@
 
 Branch: `feature/structured-memory-blocks`
 
-Status: experimental, **disabled by default**. It does not touch the running
-dsh-pet until `memoryBlocks.enabled` is set to `true` and the host is installed
-from this branch.
+Status: merged into `packages/core/lib/`, **disabled by default**.
+Enable with `memoryBlocks.enabled: true` in `~/.dsh/xilian/pet/pink-diary-pet.json`, then restart
+(the store is created during `apply`).
 
 ## What is implemented
 
 ```text
-src/dsh-pet-host/memory-blocks.js
-src/dsh-pet-host/memory-search.js
-src/dsh-pet-host/memory-summary.js
-src/dsh-pet-host/memory-context.js
-src/dsh-pet-host/memory-tools.js
+packages/core/lib/memory-blocks.js
+packages/core/lib/memory-search.js
+packages/core/lib/memory-summary.js
+packages/core/lib/memory-context.js
+packages/core/lib/memory-tools.js
 ```
 
 ### Ledger

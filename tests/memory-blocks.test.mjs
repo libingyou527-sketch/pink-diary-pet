@@ -3,10 +3,10 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { createMemoryBlockStore } from "../src/dsh-pet-host/memory-blocks.js";
-import { createStructuredSummaryWorker } from "../src/dsh-pet-host/memory-summary.js";
-import { prepareStructuredContext } from "../src/dsh-pet-host/memory-context.js";
-import { executeMemoryTool, parseMemoryToolMarkers } from "../src/dsh-pet-host/memory-tools.js";
+import { createMemoryBlockStore } from "../packages/core/lib/memory-blocks.js";
+import { createStructuredSummaryWorker } from "../packages/core/lib/memory-summary.js";
+import { prepareStructuredContext } from "../packages/core/lib/memory-context.js";
+import { executeMemoryTool, parseMemoryToolMarkers } from "../packages/core/lib/memory-tools.js";
 
 async function tempStore() {
     const dir = await mkdtemp(join(tmpdir(), "pink-memory-"));

@@ -29,8 +29,11 @@ export function loadRuntimeConfig(dshHome) {
         summaryRatio: Number(file.summaryRatio) || 0.2,
         summaryMaxChars: Number(file.summaryMaxChars) || 50,
         summaryTimeoutMs: Number(file.summaryTimeoutMs) || 5000,
-        memoryBlocksEnabled: process.env.PINK_MEMORY_BLOCKS === "1" || file.memoryBlocksEnabled === true,
-        memoryBlocksFile: file.memoryBlocksFile || join(dshHome, "xilian", "pet", "context-blocks.json"),
+        // 两种写法都认：文档里的 memoryBlocks.enabled，以及早期的扁平 memoryBlocksEnabled。
+        memoryBlocksEnabled: process.env.PINK_MEMORY_BLOCKS === "1" ||
+            file.memoryBlocksEnabled === true ||
+            file.memoryBlocks?.enabled === true,
+        memoryBlocksFile: file.memoryBlocks?.file || file.memoryBlocksFile || join(dshHome, "xilian", "pet", "context-blocks.json"),
         videoStoryboardBin: process.env.DSH_VIDEO_STORYBOARD_BIN || file.videoStoryboardBin || "",
         videoFfmpegPath: process.env.DSH_FFMPEG_PATH || file.videoFfmpegPath || "",
         videoFfprobePath: process.env.DSH_FFPROBE_PATH || file.videoFfprobePath || "",
