@@ -2,20 +2,32 @@
 
 > 一个运行在 DSH Desktop 里的粉色系 AI 桌宠：Live2D/WebM 渲染、QQ 官方 Bot 接入、多模态图片与引用消息、身份层与 ACL 分级记忆、自动日记与记忆查看器。
 
-本项目是把一套本地私有的桌宠实验整理成的可复现开源版本。代码采用 MIT 协议；Live2D 模型不随仓库分发，详见 [assets/README.md](assets/README.md)。
+本项目是把一套本地私有的桌宠实验整理成的可复现开源版本：自训 GPT-SoVITS 语音、
+结构化记忆检索、以及一本她能自己翻的粉色日记，桌面与 QQ 共用同一份记忆。代码采用 MIT 协议；Live2D 模型不随仓库分发，详见 [assets/README.md](assets/README.md)。
 
 ---
 
 ## 功能亮点
 
 - **Live2D / WebM 桌宠渲染**
-  - dsh-pet 桌面窗口与 Web 聊天弹窗；
+  - 桌面窗口与 Web 聊天弹窗（dsh-xilian-core）；
   - 支持透明桌宠、拖拽、点击、气泡对话；
   - 19 段预渲染 WebM 素材：5 个动作 / 2 个转身 / 12 个表情（1000×1000、30fps、VP9 带 alpha）；
   - 右键「镜像翻转」即时换向，方向存 `localStorage`，重启保持；
   - `POST /dsh-pet-7340/anim` 可在聊天/插件里点播任意片段（如 AI 判断开心 → `expr_星星眼`）；
   - 素材规格、配置池与接口详见 [docs/dsh-pet-animations.md](docs/dsh-pet-animations.md)；
   - 自带模型占位说明，使用者可替换为自己的 Live2D/WebM 素材。
+
+- **自己的声音（GPT-SoVITS）**
+  - 本地 GPT-SoVITS v2ProPlus + 自训权重，不是调云端 TTS；
+  - 服务按需拉起、空闲 20 分钟自动休眠，醒来后首次合成约 60-80 秒；
+  - 语音优先：`[语音]` 标签命中时先发语音，失败回落文字；
+  - 强制 UTF-8 环境，避免 `♪` 这类字符在 GBK 下合成 400。
+
+- **结构化记忆（可检索）**
+  - 长对话超预算时，最旧 20% 轮次压成 block（摘要 + 原文都保留）；
+  - 她可以 `[[search_old_memory: 关键词]]`、`[[decompress_old_memory: b1]]` 主动查旧事；
+  - 记忆按 scope 隔离（本地 / 主人私聊 / 群聊 / 他人私聊），不串门。
 
 - **QQ 官方 Bot 接入**
   - QQ 私聊与群聊；
@@ -36,23 +48,29 @@
   - 群聊绝不读取任何人的私聊 raw；被问私聊内容时统一回答：
     > 这是我们的秘密哦。
 
-- **自动粉色日记**
+- **自动粉色日记（她可以自己翻）**
   - 珍贵对话自动写入当天 Markdown；
-  - 定时一日总结；
+  - 23:59 定时一日总结；也可以点面板上的「写今日总结」提前写（每天只写一次）；
+  - 她可以 `[[read_diary: 2026-11-13]]`、`[[search_diary: 关键词]]` 主动查旧日记；
+  - 对话里只自动带最近 3 篇，更早的日期列在尾部「日记篇目」里，需要时自己查；
+  - 开局自动清理"昨天空白且无对话"的日记，避免留空页；
   - 日记不记录图片日志；纯图片不写，图文只写文字；
   - 日记目录可通过配置修改，默认 `~/.dsh/pink-diary`。
 
 - **动态上下文压缩**
-  - 默认 1M 上下文窗口，80%（800k）触发压缩；
+  - 默认 65,536 上下文窗口，80%（约 52k）触发压缩；
   - 低于阈值时加载全部历史，不再固定 `slice(-10)` / `slice(-12)`；
   - 超限时取最旧 20% 的完整 user/assistant 轮次，同步生成不超过 50 字的旧记忆摘要；
   - 摘要 5 秒超时或失败时，直接丢弃旧 20%，保证回复不被阻塞。
 
 - **Token 成本优化**
   - 本地正则判断屏幕意图，普通消息不再额外调用一次 82-token 的识屏判断；
-  - System Prompt 固定前缀：人设 → 身份 → 记忆工具 → ACL；
-  - 时间、Profile、日记、block 索引、预检索结果全部后置；
-  - 每轮模型请求后打印 `prompt_tokens / completion_tokens / total_tokens / cache_hit_tokens`。
+  - System Prompt 固定前缀：人设 → 身份 → 记忆工具 → 日记工具 → 规则；
+  - 时间、日记、篇幅/表达提醒全部后置到 user 尾部；
+  - 不做"按问题自动检索旧记忆"：那会让 system 每轮变化、缓存前缀失效；
+  - 实测：单轮输入约 45k，缓存命中率约 90%，每轮真正新 token 约 4.3k；
+  - 每轮模型请求后把 `prompt_tokens / completion_tokens / cache_hit_tokens` 写进
+    `~/.dsh/xilian/pet/token-usage.log`。
 
 - **视频分镜**
   - QQ `video/mp4` 入站不下载整段视频，只记录 URL/ID 并先回 `[视频处理中...]`；
@@ -60,10 +78,9 @@
   - 本地适配 `dsh-video-storyboard` CLI，输出一张 PNG 作为多模态附件；
   - 20 秒超时/失败回 `[视频解析失败，请稍后再试]`。
 
-- **记忆查看器**
-  - DSH 侧栏查看 dsh-pet 对话；
-  - 最近 10 条 + 加载更早；
-  - 图片缩略图按需加载。
+- **两个面板**
+  - 记忆查看：DSH 侧栏查看对话，最近 10 条 + 加载更早，缩略图按需加载；
+  - 粉色日记：按日期浏览、手动写、删除、让絮写一段、写今日总结（带去重）。
 
 ---
 
@@ -71,35 +88,31 @@
 
 ```text
 pink-diary-pet/
+├─ packages/core/               # dsh-xilian-core（唯一真源，junction 部署到 profile）
+│  ├─ lib/
+│  │  ├─ index.js               # 宿主：提示词/记忆/聊天/QQ/TTS/路由
+│  │  ├─ client.js              # 浏览器端
+│  │  ├─ config.js              # 运行时配置（diaryDir / memoryBlocks …）
+│  │  ├─ memory-*.js            # 结构化记忆：块账本/检索/摘要/上下文/工具
+│  │  └─ diary-tools.js         # 日记查询工具（解析/检索/格式化）
+│  └─ runtime/electron-helper/  # 桌面窗口（Electron）
 ├─ src/
-│  ├─ dsh-pet-host/              # dsh-pet 0.3.8 的最终修改版
-│  │  ├─ index.js
-│  │  ├─ client.js
-│  │  ├─ config.js               # 路径/owner 配置读取
-│  │  └─ runtime/electron-helper/
-│  ├─ qqbot/                     # dsh-qqbot 0.5.2 的最终修改版
-│  │  ├─ gateway/
-│  │  └─ pet-bridge/
-│  ├─ plugins/
-│  │  ├─ pink-diary/             # DSH 粉色日记插件
-│  │  └─ memory-viewer/          # DSH 记忆查看器插件
-│  └─ shared/
-├─ config/
-│  ├─ config.example.yml
-│  └─ identity.example.json
-├─ scripts/
-│  ├─ install.mjs                # 部署到 DSH profile
-│  └─ verify.mjs                 # 隐私/语法检查
-├─ tests/fixtures/               # 仅脱敏示例
-├─ assets/                       # 不放模型，仅说明
-├─ README.md
-├─ LICENSE
-├─ NOTICE
-└─ .gitignore
+│  ├─ plugins/pink-diary/       # 日记面板（前端 + 空壳宿主）
+│  ├─ plugins/memory-viewer/    # 记忆面板（前端 + 空壳宿主）
+│  └─ qqbot/                    # qqbot 补丁镜像（仅归档，部署在 profile 的 node_modules）
+├─ tools/
+│  ├─ gpt-sovits/               # 启动/停止/修剪脚本
+│  └─ dsh/                      # 补丁文件 + 校验脚本 + cookie 维护
+├─ tests/                       # memory-blocks / diary-tools
+├─ docs/                        # 架构、提示词地图、补丁与运维文档
+├─ config/                      # config.example.yml / identity.example.json
+├─ scripts/                     # install.mjs / verify.mjs / upstream-diff.mjs
+└─ assets/                      # 图标与压缩表情包（模型不入库）
 ```
 
-`src/dsh-pet-host/` 与 `src/qqbot/` 是**最终代码**，不是 patch 文件。  
-`scripts/install.mjs` 只负责把这些文件复制到 DSH profile，不再维护零散补丁。
+`packages/core/` 是唯一真源，通过 junction 挂进 DSH profile；`src/qqbot/` 只是补丁归档，
+真正生效的是 profile 里 `@tencent-connect/dsh-qqbot` 的 `dist/`（由 pnpm patch 重放，见
+[docs/Qqbot-Patches.md](docs/Qqbot-Patches.md)）。
 
 ---
 
@@ -107,9 +120,11 @@ pink-diary-pet/
 
 ### 1. 环境准备
 
-- **Node.js >= 22.12.0**
-  - dsh-pet 0.3.8 要求 Node >= 22.12；
-  - qqbot 0.5.2 要求 Node >= 20.3，实际以 22.12 为准。
+- **Node.js >= 24**
+  - DSH 0.2.2 自带 Node 24 运行时；
+  - qqbot 0.5.2 要求 >= 20.3，GPT-SoVITS 走独立的 conda 环境。
+- **（可选）GPT-SoVITS v2ProPlus**
+  - 需要语音时安装，仓库不分发模型权重；设置见 `~/.dsh/xilian/tts/settings.json`。
 - **DSH Desktop**
   - 需要已经安装并启动过一次，确保存在 profile：
     ```text
@@ -124,10 +139,10 @@ pink-diary-pet/
 ```bash
 git clone https://github.com/<your-name>/pink-diary-pet.git
 cd pink-diary-pet
-npm install
+npm install          # 只装部署脚本需要的 js-yaml
 ```
 
-根目录只安装部署脚本所需的 `js-yaml`。`dsh-pet`、`dsh-qqbot`、`sharp` 由 DSH profile 提供。
+根目录只安装部署脚本所需的 `js-yaml`。`dsh-xilian-core`、`dsh-qqbot`、`sharp` 由 DSH profile 提供。
 
 ### 3. 准备配置
 
@@ -149,8 +164,8 @@ qq:
 
 paths:
   diaryDir: "~/.dsh/pink-diary"
-  pictureDir: "~/.dsh/dsh-pet/pictures"
-  memoryDir: "~/.dsh/dsh-pet"
+  pictureDir: "~/.dsh/xilian/pet/pictures"
+  memoryDir: "~/.dsh/xilian/pet"
 
 profile:
   name: "desktop"
@@ -163,7 +178,7 @@ QQBOT_APP_ID=你的 AppID
 QQBOT_APP_SECRET=你的 AppSecret
 OWNER_OPENIDS=你的 openid
 PINK_DIARY_DIR=~/.dsh/pink-diary
-PINK_PICTURE_DIR=~/.dsh/dsh-pet/pictures
+PINK_PICTURE_DIR=~/.dsh/xilian/pet/pictures
 DSH_PROFILE=desktop
 ```
 
@@ -193,10 +208,10 @@ npm run install:host -- --profile desktop
 脚本会：
 
 - 读取 `config/config.yml` 与 `.env`；
-- 生成 `~/.dsh/dsh-pet/pink-diary-pet.json`；
+- 生成 `~/.dsh/xilian/pet/pink-diary-pet.json`；
 - 创建日记/图片目录；
 - 复制最终 host / qqbot / 两个插件到 profile；
-- 如果 `~/.dsh/dsh-pet/identity.json` 不存在，生成空 owner 的示例身份文件。
+- 如果 `~/.dsh/xilian/pet/identity.json` 不存在，生成空 owner 的示例身份文件。
 
 也可以先 dry-run：
 
@@ -213,15 +228,15 @@ node scripts/install.mjs --profile desktop --dry-run
 
 ### 7. 启动
 
-重启 DSH Desktop，或重载 dsh-pet/qqbot 插件。
+重启 DSH Desktop，或重载 dsh-xilian-core / qqbot 插件。
 
 默认目录：
 
 ```text
 ~/.dsh/pink-diary              # 日记
-~/.dsh/dsh-pet/pictures        # 图片
-~/.dsh/dsh-pet/memory.json     # 主人本地记忆
-~/.dsh/dsh-pet/identity.json   # 身份层
+~/.dsh/xilian/pet/pictures        # 图片
+~/.dsh/xilian/pet/memory.json     # 主人本地记忆
+~/.dsh/xilian/pet/identity.json   # 身份层
 ~/.dsh/qqbot/pet-qq-memory.json
 ```
 
@@ -283,7 +298,7 @@ node scripts/install.mjs --profile desktop --dry-run
 
 ```yaml
 context:
-  window: 1000000
+  window: 65536      # 预算 = window × compressionRatio ≈ 52k
   compressionRatio: 0.8
   summaryRatio: 0.2
   summaryMaxChars: 50
@@ -298,30 +313,43 @@ context:
 4. 保留剩余 80% 历史；
 5. 摘要超过 5 秒或失败，直接丢弃旧 20%，不阻塞回复。
 
-更换模型时只改 `window`，不需要改代码。
+更换模型时只改 `window`，不需要改代码。窗口开太大不会更聪明：历史越长，
+她对其中某一句的注意力越差（"第一句话是什么"这类问题会答不上）。
 
-### 结构化记忆实验分支
+### 结构化记忆（已启用）
 
-`feature/structured-memory-blocks` 分支额外实现：
+超预算时，最旧 20% 的完整轮次会压成一个 block：
 
-- scope 隔离的 block ledger（`context-blocks.json`）；
-- 后台结构化摘要，不阻塞当前回复；
-- `search_old_memory` / `decompress_old_memory` 工具模块；
-- CJK/BM25 + fuzzy 检索；
-- 默认关闭，配置：
-  ```yaml
-  memoryBlocks:
-    enabled: false
-    file: "~/.dsh/dsh-pet/context-blocks.json"
-  ```
-- 详细设计与测试范围见 [docs/structured-memory-experiment.md](docs/structured-memory-experiment.md)。
+```text
+block = 摘要（给上下文）+ 原始消息（给检索）+ 关键词 + 时间边界
+文件   ~/.dsh/xilian/pet/context-blocks.json
+scope  本地 owner / 主人私聊 owner-private / 群聊 group:<id>，互相隔离
+```
 
-该实验分支不改变稳定版同步摘要路径，也不会在未安装该分支时生效。
+她有两种工具可以主动查旧事（文本标记，非函数调用）：
+
+```text
+[[search_old_memory: 关键词]]   命中 block 的摘要 + 该块开头两条原文
+[[decompress_old_memory: b1]]   取某个 block 的原文，可分页
+```
+
+设计取舍：**不做"按当前问题自动检索"**。试过放在 system 和 user 尾部，
+前者每轮破坏缓存前缀，后者让她"手里被塞了搜索结果"、容易主动翻旧账；
+现在只保留块索引，旧细节一律由她自己查。
+
+配置：
+
+```json
+"memoryBlocks": { "enabled": true, "file": "~/.dsh/xilian/pet/context-blocks.json" }
+```
+
+两种写法都认：`memoryBlocks.enabled` 与扁平的 `memoryBlocksEnabled`。
+详细设计与测试见 [docs/structured-memory-experiment.md](docs/structured-memory-experiment.md)。
 
 ### 身份层
 
 ```text
-~/.dsh/dsh-pet/identity.json
+~/.dsh/xilian/pet/identity.json
 ```
 
 ```json
@@ -341,25 +369,25 @@ context:
 
 ### 路径
 
-`src/dsh-pet-host/config.js` 读取：
+`packages/core/lib/config.js` 读取：
 
 1. 环境变量 `PINK_DIARY_DIR` / `PINK_PICTURE_DIR`；
-2. `~/.dsh/dsh-pet/pink-diary-pet.json`；
+2. `~/.dsh/xilian/pet/pink-diary-pet.json`；
 3. 默认值。
 
 默认：
 
 ```text
 ~/.dsh/pink-diary
-~/.dsh/dsh-pet/pictures
+~/.dsh/xilian/pet/pictures
 ```
 
 ### 用户记忆
 
 ```text
-~/.dsh/dsh-pet/user-memory.json        # 私聊
-~/.dsh/dsh-pet/user-group-memory.json  # 群聊公开历史
-~/.dsh/dsh-pet/user-profiles.json      # 公开 profile
+~/.dsh/xilian/pet/user-memory.json        # 私聊
+~/.dsh/xilian/pet/user-group-memory.json  # 群聊公开历史
+~/.dsh/xilian/pet/user-profiles.json      # 公开 profile
 ```
 
 群聊路径只读 `user-profiles.json`，不会读取 `user-memory.json`。
@@ -375,7 +403,7 @@ context:
    `memory.json`、`identity.json`、`user-*.json`、`pet-qq-memory.json` 都属于隐私数据。
 
 3. **不要提交真实日记/图片**  
-   `~/.dsh/pink-diary`、`~/.dsh/dsh-pet/pictures` 以及任何私人绝对路径目录都不要放进仓库。
+   `~/.dsh/pink-diary`、`~/.dsh/xilian/pet/pictures` 以及任何私人绝对路径目录都不要放进仓库。
 
 4. **不要提交真实 openid**  
    文档、测试、示例统一使用 `<OWNER_OPENID>` / `00000000000000000000000000000000`。
@@ -389,9 +417,11 @@ context:
 
 | 依赖 | 版本 | 说明 |
 |---|---|---|
-| Node.js | >= 22.12.0 | dsh-pet 运行时要求 |
-| dsh-pet | 0.3.8 | 桌宠 host，MIT |
-| @tencent-connect/dsh-qqbot | 0.5.2 | QQ Bot 接入，MIT |
+| Node.js | >= 24 | DSH 0.2.2 runtime |
+| DSH | 0.2.2-rc.5 | 桌面宿主 |
+| dsh-xilian-core | 0.1.0 | 本项目内核（fork 自 dsh-pet 0.3.8，MIT） |
+| GPT-SoVITS | v2ProPlus | 本地语音，AGPL（独立安装，不随仓库分发） |
+| @tencent-connect/dsh-qqbot | 0.5.2（钉死） | QQ Bot，本地补丁 + pnpm patch 重放 |
 | @tencent-connect/qqbot-nodejs | 1.0.5 | QQ SDK，MIT |
 | sharp | 0.35.5 | 图片压缩（由 profile 安装） |
 | js-yaml | ^4.1.0 | 安装脚本读取配置 |
@@ -404,14 +434,18 @@ context:
 ## 开发与验证
 
 ```bash
-npm run verify
+npm run verify                      # 路径/密钥/语法体检
+node tests/memory-blocks.test.mjs   # 结构化记忆（4 项）
+node tests/diary-tools.test.mjs     # 日记解析与检索（4 项）
+node tools/dsh/verify-qqbot-patches.mjs   # qqbot 补丁是否还在
 ```
 
 检查：
 
 - 是否残留真实 openid / 本地绝对路径；
 - JS/JSON 语法；
-- 是否误提交 `.tmp`、`backup`、patch 快照。
+- 是否误提交 `.tmp`、`backup`、patch 快照；
+- qqbot 的 petMode / 语音 / pet-bridge 标记是否完整（DSH 或插件更新后必跑）。
 
 ---
 
